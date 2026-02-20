@@ -92,6 +92,7 @@ Security smoke checks:
 
 ```powershell
 npm.cmd run smoke:security
+npm.cmd run smoke:security:strict
 npm.cmd run repo:check
 npm.cmd run security:invariants
 npm.cmd run release:notes -- v0.1.0
@@ -129,7 +130,7 @@ node scripts/security-tools.mjs verify-attestation-chain-keyring .\approval_atte
 node scripts/security-tools.mjs verify-audit-chain "$env:USERPROFILE\\.openclaw\\enterprise_audit.db"
 ```
 
-A GitHub Actions workflow (`.github/workflows/security-smoke.yml`) runs the same checks on push/PR.
+A GitHub Actions workflow (`.github/workflows/security-smoke.yml`) runs strict replay-backed checks on push/PR using Redis and Postgres service containers.
 
 ## 3. Wire OpenClaw
 
@@ -223,6 +224,7 @@ Channel ingress endpoint (for corporate connectors):
 - Channel ingress event IDs are replay-protected; duplicate `x-channel-event-id` / `event_id` values are rejected with `409`.
 - For multi-node deployments, use `REPLAY_STORE_MODE=redis` or `REPLAY_STORE_MODE=postgres` so replay dedupe is shared across nodes.
 - Redis/Postgres replay mode is validated at startup and fails fast on bad config/connectivity.
+- `REPLAY_SMOKE_STRICT=true` forces replay smoke tests to fail when replay backend URLs are missing (used by CI/release workflows).
 - Status/metrics include `node_id`, `cluster_id`, and signed config fingerprints for cross-node drift detection.
 - Control and channel ingress endpoints are rate-limited and return `429` with `retry-after`.
 - Status/metrics include active control-authz catalog state and connector catalog fingerprint/signing state.

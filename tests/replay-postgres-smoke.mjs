@@ -6,9 +6,20 @@ import path from "node:path";
 import { InteractionStore } from "../dist/interaction-store.js";
 import { createReplayStore } from "../dist/replay-store.js";
 
+function strictModeEnabled() {
+  const raw = String(process.env.REPLAY_SMOKE_STRICT || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 async function main() {
   const postgresUrl = String(process.env.REPLAY_POSTGRES_URL || "").trim();
+  const strictMode = strictModeEnabled();
   if (!postgresUrl) {
+    if (strictMode) {
+      throw new Error(
+        "replay-postgres-smoke: REPLAY_POSTGRES_URL is required when REPLAY_SMOKE_STRICT=true",
+      );
+    }
     console.log("replay-postgres-smoke: skipped (REPLAY_POSTGRES_URL not set)");
     return;
   }

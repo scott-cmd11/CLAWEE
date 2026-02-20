@@ -16,6 +16,9 @@
 - Added cluster identity metadata (`CLAWEE_NODE_ID`, `CLAWEE_CLUSTER_ID`) to status/metrics/conformance artifacts.
 - Added config-fingerprint telemetry to detect cross-node policy/config drift in multi-node deployments.
 - Added Postgres replay smoke test and wired it into `smoke:security`.
+- Added strict replay smoke mode (`REPLAY_SMOKE_STRICT=true`) that fails on missing replay backends.
+- Added `smoke:security:strict` script and moved smoke scripts to cross-platform `npm run build` invocation.
+- Upgraded GitHub `security-smoke` and `release` workflows to run Redis/Postgres service-backed strict replay smoke checks.
 
 ## 0.1.0
 

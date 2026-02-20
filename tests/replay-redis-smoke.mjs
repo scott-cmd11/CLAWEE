@@ -6,9 +6,20 @@ import path from "node:path";
 import { InteractionStore } from "../dist/interaction-store.js";
 import { createReplayStore } from "../dist/replay-store.js";
 
+function strictModeEnabled() {
+  const raw = String(process.env.REPLAY_SMOKE_STRICT || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 async function main() {
   const redisUrl = String(process.env.REPLAY_REDIS_URL || "").trim();
+  const strictMode = strictModeEnabled();
   if (!redisUrl) {
+    if (strictMode) {
+      throw new Error(
+        "replay-redis-smoke: REPLAY_REDIS_URL is required when REPLAY_SMOKE_STRICT=true",
+      );
+    }
     console.log("replay-redis-smoke: skipped (REPLAY_REDIS_URL not set)");
     return;
   }

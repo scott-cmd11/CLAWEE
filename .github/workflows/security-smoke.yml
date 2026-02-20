@@ -7,6 +7,29 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,5 +46,12 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Security Smoke
-        run: npm run smoke:security
+      - name: Security Smoke (Strict)
+        env:
+          REPLAY_REDIS_URL: redis://127.0.0.1:6379
+          REPLAY_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          REPLAY_POSTGRES_SCHEMA: clawee
+          REPLAY_POSTGRES_TABLE_PREFIX: replay_
+          REPLAY_POSTGRES_CONNECT_TIMEOUT_MS: 10000
+          REPLAY_POSTGRES_SSL_MODE: disable
+        run: npm run smoke:security:strict
