@@ -345,6 +345,27 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+  /_clawee/control/modality/ingest:
+    post:
+      summary: Ingest validated modality observation (control plane)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModalityIngestRequest"
+      responses:
+        "200":
+          description: Observation ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Schema validation failed
+        "413":
+          description: Payload size limit exceeded
   /_clawee/channel/{channel}/inbound:
     post:
       summary: Ingest inbound channel event (connector)
@@ -382,10 +403,13 @@ paths:
               properties:
                 source:
                   type: string
+                  maxLength: 256
                 sender:
                   type: string
+                  maxLength: 256
                 text:
                   type: string
+                  maxLength: 8000
                 event_id:
                   type: string
                 metadata:
@@ -441,6 +465,157 @@ components:
               fingerprint:
                 type: string
   schemas:
+    ModalityIngestRequest:
+      oneOf:
+        - $ref: "#/components/schemas/ModalityIngestTextRequest"
+        - $ref: "#/components/schemas/ModalityIngestVisionRequest"
+        - $ref: "#/components/schemas/ModalityIngestAudioRequest"
+        - $ref: "#/components/schemas/ModalityIngestActionRequest"
+    ModalityIngestTextRequest:
+      type: object
+      required: [session_id, modality, source, payload]
+      properties:
+        session_id:
+          type: string
+          maxLength: 256
+        modality:
+          type: string
+          enum: [text]
+        source:
+          type: string
+          maxLength: 256
+        timestamp:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          required: [text]
+          additionalProperties: false
+          properties:
+            text:
+              type: string
+            language:
+              type: string
+              maxLength: 32
+            sender:
+              type: string
+              maxLength: 256
+            metadata:
+              type: object
+              additionalProperties: true
+    ModalityIngestVisionRequest:
+      type: object
+      required: [session_id, modality, source, payload]
+      properties:
+        session_id:
+          type: string
+          maxLength: 256
+        modality:
+          type: string
+          enum: [vision]
+        source:
+          type: string
+          maxLength: 256
+        timestamp:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            image_url:
+              type: string
+              maxLength: 4096
+            image_b64:
+              type: string
+            ocr_text:
+              type: string
+            mime_type:
+              type: string
+            width:
+              type: integer
+            height:
+              type: integer
+            metadata:
+              type: object
+              additionalProperties: true
+    ModalityIngestAudioRequest:
+      type: object
+      required: [session_id, modality, source, payload]
+      properties:
+        session_id:
+          type: string
+          maxLength: 256
+        modality:
+          type: string
+          enum: [audio]
+        source:
+          type: string
+          maxLength: 256
+        timestamp:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            transcript:
+              type: string
+            audio_url:
+              type: string
+              maxLength: 4096
+            audio_b64:
+              type: string
+            mime_type:
+              type: string
+            duration_ms:
+              type: integer
+            speaker:
+              type: string
+              maxLength: 256
+            metadata:
+              type: object
+              additionalProperties: true
+    ModalityIngestActionRequest:
+      type: object
+      required: [session_id, modality, source, payload]
+      properties:
+        session_id:
+          type: string
+          maxLength: 256
+        modality:
+          type: string
+          enum: [action]
+        source:
+          type: string
+          maxLength: 256
+        timestamp:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          required: [action]
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              maxLength: 128
+            status:
+              type: string
+              enum: [queued, running, succeeded, failed]
+            target:
+              type: string
+              maxLength: 512
+            arguments:
+              type: object
+              additionalProperties: true
+            result: {}
+            error:
+              type: string
+              maxLength: 4000
+            metadata:
+              type: object
+              additionalProperties: true
     ApprovalRecord:
       type: object
       properties:

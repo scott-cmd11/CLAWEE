@@ -24,6 +24,7 @@ import type { AuditStartupVerifyMode, EnforcementMode, RiskEvaluatorFailMode } f
 import { type ControlPermission, type ControlIdentity, ControlAuthz } from "./control-authz";
 import type { RiskEvaluator, ToolIntent } from "./inference-provider";
 import { InteractionStore } from "./interaction-store";
+import { validateModalityPayload, type ModalityPayloadValidationOptions } from "./modality-validation";
 import { ModelRegistry, type ModelModality } from "./model-registry";
 import { ModalityHub, type ModalityType } from "./modality-hub";
 import { PolicyEngine } from "./policy-engine";
@@ -46,6 +47,12 @@ export interface UncertaintyGateOptions {
   channelIngressHmacSecret: string;
   channelIngressMaxSkewSeconds: number;
   channelIngressEventTtlSeconds: number;
+  modalityTextMaxPayloadBytes: number;
+  modalityVisionMaxPayloadBytes: number;
+  modalityAudioMaxPayloadBytes: number;
+  modalityActionMaxPayloadBytes: number;
+  modalityTextMaxChars: number;
+  channelIngressMaxTextChars: number;
   controlRateLimitWindowSeconds: number;
   controlRateLimitMaxRequests: number;
   channelIngressRateLimitWindowSeconds: number;
@@ -61,6 +68,30 @@ export interface UncertaintyGateOptions {
 
 export interface UncertaintyGateService {
   close(): Promise<void>;
+}
+
+const MAX_MODALITY_SESSION_ID_CHARS = 256;
+const MAX_MODALITY_SOURCE_CHARS = 256;
+const MAX_CHANNEL_SOURCE_CHARS = 256;
+const MAX_CHANNEL_SENDER_CHARS = 256;
+
+function nonEmptyStringWithMax(value: unknown, maxChars: number): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxChars) {
+    return "";
+  }
+  return trimmed;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 function parseApprovalMetadata(metadataRaw: string): Record<string, unknown> {
@@ -523,6 +554,15 @@ export async function startUncertaintyGate(
     options.channelIngressRateLimitWindowSeconds,
     options.channelIngressRateLimitMaxRequests,
   );
+  const modalityPayloadValidation: ModalityPayloadValidationOptions = {
+    maxPayloadBytes: {
+      text: Math.max(256, Math.floor(options.modalityTextMaxPayloadBytes)),
+      vision: Math.max(1024, Math.floor(options.modalityVisionMaxPayloadBytes)),
+      audio: Math.max(1024, Math.floor(options.modalityAudioMaxPayloadBytes)),
+      action: Math.max(256, Math.floor(options.modalityActionMaxPayloadBytes)),
+    },
+    textMaxChars: Math.max(32, Math.floor(options.modalityTextMaxChars)),
+  };
 
   const controlAuth =
     (permission: ControlPermission): RequestHandler =>
@@ -583,7 +623,15 @@ export async function startUncertaintyGate(
       max_request_input_tokens: options.maxRequestInputTokens,
       max_request_output_tokens: options.maxRequestOutputTokens,
       channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
+      channel_ingress_max_text_chars: options.channelIngressMaxTextChars,
       channel_max_outbound_chars: options.channelMaxOutboundChars,
+      modality_text_max_chars: options.modalityTextMaxChars,
+      modality_payload_max_bytes: {
+        text: options.modalityTextMaxPayloadBytes,
+        vision: options.modalityVisionMaxPayloadBytes,
+        audio: options.modalityAudioMaxPayloadBytes,
+        action: options.modalityActionMaxPayloadBytes,
+      },
       approval_required_count: options.approvalRequiredCount,
       approval_max_uses: options.approvalMaxUses,
       model_registry_fingerprint: options.modelRegistryFingerprint,
@@ -798,7 +846,15 @@ export async function startUncertaintyGate(
       max_request_input_tokens: options.maxRequestInputTokens,
       max_request_output_tokens: options.maxRequestOutputTokens,
       channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
+      channel_ingress_max_text_chars: options.channelIngressMaxTextChars,
       channel_max_outbound_chars: options.channelMaxOutboundChars,
+      modality_text_max_chars: options.modalityTextMaxChars,
+      modality_payload_max_bytes: {
+        text: options.modalityTextMaxPayloadBytes,
+        vision: options.modalityVisionMaxPayloadBytes,
+        audio: options.modalityAudioMaxPayloadBytes,
+        action: options.modalityActionMaxPayloadBytes,
+      },
       approval_required_count: options.approvalRequiredCount,
       approval_max_uses: options.approvalMaxUses,
       budget: budgetController.getStatus(),
@@ -1227,12 +1283,38 @@ export async function startUncertaintyGate(
   });
 
   app.post("/_clawee/control/modality/ingest", controlAuth("modality.write"), (req, res) => {
-    const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id : "";
+    const sessionId = nonEmptyStringWithMax(req.body?.session_id, MAX_MODALITY_SESSION_ID_CHARS);
     const modality = typeof req.body?.modality === "string" ? req.body.modality : "";
-    const source = typeof req.body?.source === "string" ? req.body.source : "";
+    const source = nonEmptyStringWithMax(req.body?.source, MAX_MODALITY_SOURCE_CHARS);
     if (!sessionId || !source || !["text", "vision", "audio", "action"].includes(modality)) {
       res.status(400).json({
         error: "Invalid modality observation payload.",
+      });
+      return;
+    }
+    const validation = validateModalityPayload(
+      modality as ModalityType,
+      req.body?.payload,
+      modalityPayloadValidation,
+    );
+    if (!validation.ok || !validation.normalizedPayload) {
+      ledger.logAndSignAction("MODALITY_PAYLOAD_BLOCKED", {
+        path: req.originalUrl,
+        reason: validation.reason,
+        status_code: validation.statusCode,
+        modality,
+        payload_bytes: validation.payloadBytes,
+        max_payload_bytes: validation.maxPayloadBytes,
+      });
+      res.status(validation.statusCode).json({
+        error:
+          validation.statusCode === 413
+            ? "Modality payload exceeds configured size limits."
+            : "Invalid modality payload schema.",
+        reason: validation.reason,
+        modality,
+        payload_bytes: validation.payloadBytes,
+        max_payload_bytes: validation.maxPayloadBytes,
       });
       return;
     }
@@ -1240,7 +1322,7 @@ export async function startUncertaintyGate(
       session_id: sessionId,
       modality: modality as ModalityType,
       source,
-      payload: req.body?.payload ?? {},
+      payload: validation.normalizedPayload,
       timestamp: typeof req.body?.timestamp === "string" ? req.body.timestamp : undefined,
     });
     ledger.logAndSignAction("MODALITY_OBSERVATION", {
@@ -1363,11 +1445,61 @@ export async function startUncertaintyGate(
 
   app.post("/_clawee/channel/:channel/inbound", channelIngestAuth, (req, res) => {
     const channel = parseChannelKind(req.params.channel || "");
-    const source = typeof req.body?.source === "string" ? req.body.source : "";
-    const sender = typeof req.body?.sender === "string" ? req.body.sender : "";
-    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    const source = nonEmptyStringWithMax(req.body?.source, MAX_CHANNEL_SOURCE_CHARS);
+    const sender = nonEmptyStringWithMax(req.body?.sender, MAX_CHANNEL_SENDER_CHARS);
+    const textLimit = Math.max(1, options.channelIngressMaxTextChars);
+    const rawText = typeof req.body?.text === "string" ? req.body.text : "";
+    if (rawText.length > textLimit) {
+      ledger.logAndSignAction("CHANNEL_INGRESS_PAYLOAD_BLOCKED", {
+        path: req.originalUrl,
+        channel: req.params.channel || "unknown",
+        reason: "text length exceeds limit",
+        status_code: 413,
+        text_chars: rawText.length,
+        max_text_chars: textLimit,
+      });
+      res.status(413).json({
+        error: "Inbound channel payload exceeds configured size limits.",
+        reason: `Field "text" exceeds ${textLimit} characters.`,
+      });
+      return;
+    }
+    const text = nonEmptyStringWithMax(rawText, textLimit);
     if (!channel || !source || !sender || !text) {
       res.status(400).json({ error: "Invalid inbound channel payload." });
+      return;
+    }
+    const metadata = req.body?.metadata ?? {};
+    if (!isPlainObject(metadata)) {
+      res.status(400).json({ error: "Invalid inbound channel payload metadata." });
+      return;
+    }
+    const textPayloadValidation = validateModalityPayload(
+      "text",
+      {
+        sender,
+        text,
+        metadata,
+      },
+      modalityPayloadValidation,
+    );
+    if (!textPayloadValidation.ok || !textPayloadValidation.normalizedPayload) {
+      ledger.logAndSignAction("CHANNEL_INGRESS_PAYLOAD_BLOCKED", {
+        path: req.originalUrl,
+        channel,
+        source,
+        reason: textPayloadValidation.reason,
+        status_code: textPayloadValidation.statusCode,
+        payload_bytes: textPayloadValidation.payloadBytes,
+        max_payload_bytes: textPayloadValidation.maxPayloadBytes,
+      });
+      res.status(textPayloadValidation.statusCode).json({
+        error:
+          textPayloadValidation.statusCode === 413
+            ? "Inbound channel payload exceeds configured size limits."
+            : "Invalid inbound channel payload schema.",
+        reason: textPayloadValidation.reason,
+      });
       return;
     }
     const inbound = channelHub.ingestInbound({
@@ -1375,18 +1507,17 @@ export async function startUncertaintyGate(
       source,
       sender,
       text,
-      metadata: (req.body?.metadata || {}) as Record<string, unknown>,
+      metadata,
       timestamp: typeof req.body?.timestamp === "string" ? req.body.timestamp : undefined,
     });
+    const inboundSessionId =
+      nonEmptyStringWithMax(req.body?.session_id, MAX_MODALITY_SESSION_ID_CHARS) ||
+      `channel:${channel}:${source}`;
     const observation = modalityHub.ingest({
-      session_id: typeof req.body?.session_id === "string" ? req.body.session_id : `channel:${channel}:${source}`,
+      session_id: inboundSessionId,
       modality: "text",
       source: `${channel}:${source}`,
-      payload: {
-        sender,
-        text,
-        metadata: inbound.metadata,
-      },
+      payload: textPayloadValidation.normalizedPayload,
       timestamp: inbound.timestamp,
     });
     ledger.logAndSignAction("CHANNEL_EVENT_INGESTED", {

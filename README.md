@@ -33,11 +33,15 @@ Optional:
 - `CHANNEL_INGRESS_HMAC_SECRET` (enables HMAC validation for channel ingress)
 - `CHANNEL_INGRESS_MAX_SKEW_SECONDS` (max allowed timestamp skew for signed ingress requests)
 - `CHANNEL_INGRESS_EVENT_TTL_SECONDS` (event-id dedupe TTL for `x-channel-event-id` / body `event_id`)
+- `CHANNEL_INGRESS_MAX_TEXT_CHARS` (hard cap for inbound channel `text` length)
 - `CONTROL_RATE_LIMIT_WINDOW_SECONDS` / `CONTROL_RATE_LIMIT_MAX_REQUESTS`
 - `CHANNEL_INGRESS_RATE_LIMIT_WINDOW_SECONDS` / `CHANNEL_INGRESS_RATE_LIMIT_MAX_REQUESTS`
 - `REPLAY_STORE_MODE` (`sqlite` default, `redis` for cluster-shared replay defense)
 - `REPLAY_REDIS_URL` / `REPLAY_REDIS_PREFIX` (required when `REPLAY_STORE_MODE=redis`)
 - `AUDIT_STARTUP_VERIFY_MODE` (`block` default; `warn` or `off` for relaxed startup integrity handling)
+- `MODALITY_TEXT_MAX_PAYLOAD_BYTES` / `MODALITY_VISION_MAX_PAYLOAD_BYTES`
+- `MODALITY_AUDIO_MAX_PAYLOAD_BYTES` / `MODALITY_ACTION_MAX_PAYLOAD_BYTES`
+- `MODALITY_TEXT_MAX_CHARS` (schema cap for text modality payloads)
 - `MAX_REQUEST_INPUT_TOKENS` / `MAX_REQUEST_OUTPUT_TOKENS` (hard per-request token ceilings)
 - `RISK_EVALUATOR_FAIL_MODE` (`block` recommended for fail-closed behavior)
 - `CONTROL_TOKENS_PATH` (optional RBAC token catalog; legacy `CONTROL_API_TOKEN` remains superadmin)
@@ -175,6 +179,8 @@ Channel ingress endpoint (for corporate connectors):
 - `ENFORCEMENT_MODE=block` blocks low-confidence risky tool actions.
 - `RISK_EVALUATOR_FAIL_MODE=block` fails closed if the secondary risk evaluator is unavailable.
 - `AUDIT_STARTUP_VERIFY_MODE=block` fails startup if audit hash-chain integrity is broken.
+- Modality ingest enforces strict per-modality schemas (`text|vision|audio|action`).
+- Modality and channel-ingress payload size limits return `413` when exceeded.
 - Budget caps are enforced via `HOURLY_USD_CAP` and `DAILY_USD_CAP`.
 - Per-request token ceilings are enforced before forwarding and return `413` when exceeded.
 - Budget breach auto-suspends inference forwarding until manual resume.

@@ -351,6 +351,12 @@ async function main() {
         channelIngressHmacSecret: hmacSecret,
         channelIngressMaxSkewSeconds: 120,
         channelIngressEventTtlSeconds: 86400,
+        modalityTextMaxPayloadBytes: 512,
+        modalityVisionMaxPayloadBytes: 1024 * 1024,
+        modalityAudioMaxPayloadBytes: 1024 * 1024,
+        modalityActionMaxPayloadBytes: 2048,
+        modalityTextMaxChars: 300,
+        channelIngressMaxTextChars: 200,
         channelMaxOutboundChars: 2000,
         maxRequestInputTokens: 50000,
         maxRequestOutputTokens: 1024,
@@ -466,6 +472,95 @@ async function main() {
       body: ingressBody,
     });
     assert.equal(eventReplayRes.status, 409);
+
+    const modalityInvalidSchemaRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/modality/ingest`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          session_id: "sess-1",
+          modality: "text",
+          source: "slack:eng-team",
+          payload: {
+            sender: "alice",
+          },
+        }),
+      },
+    );
+    assert.equal(modalityInvalidSchemaRes.status, 400);
+
+    const modalityOversizeRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/modality/ingest`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          session_id: "sess-2",
+          modality: "text",
+          source: "slack:eng-team",
+          payload: {
+            text: "x".repeat(250),
+            metadata: {
+              note: "z".repeat(400),
+            },
+          },
+        }),
+      },
+    );
+    assert.equal(modalityOversizeRes.status, 413);
+
+    const modalityValidRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/modality/ingest`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          session_id: "sess-3",
+          modality: "text",
+          source: "slack:eng-team",
+          payload: {
+            text: "Build finished successfully.",
+            sender: "alice",
+            metadata: { lane: "release" },
+          },
+        }),
+      },
+    );
+    assert.equal(modalityValidRes.status, 200);
+
+    const oversizeIngressBody = JSON.stringify({
+      source: "eng-team",
+      sender: "alice",
+      text: "y".repeat(220),
+      metadata: { room: "ops" },
+    });
+    const oversizeIngressTs = String(Math.floor(Date.now() / 1000) + 2);
+    const oversizeIngressSig = channelSignature(hmacSecret, oversizeIngressBody, oversizeIngressTs);
+    const oversizeIngressRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/channel/slack/inbound`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-channel-token": ingestToken,
+          "x-channel-timestamp": oversizeIngressTs,
+          "x-channel-signature": oversizeIngressSig,
+          "x-channel-event-id": "evt-oversize-1",
+        },
+        body: oversizeIngressBody,
+      },
+    );
+    assert.equal(oversizeIngressRes.status, 413);
 
     const readonlySuspend = await fetch(`http://127.0.0.1:${gatePort}/_clawee/control/suspend`, {
       method: "POST",

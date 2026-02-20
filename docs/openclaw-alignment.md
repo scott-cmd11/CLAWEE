@@ -14,7 +14,7 @@ Reference architecture source:
 - Workspace memory (`SOUL.md`, agent session logs under `.openclaw`)
   - Claw-EE maps this to `AffectiveMemoryService`, audit logging, and interaction persistence.
 - Communication channels (Slack/Teams/Discord/Email style usage pattern)
-  - Claw-EE maps this to authenticated channel ingress, signed channel delivery, and delivery lifecycle state tracking.
+  - Claw-EE maps this to authenticated channel ingress, strict ingress payload validation, signed channel delivery, and delivery lifecycle state tracking.
 - Model/provider configuration (`OPENCLAW_MODEL`, API base URLs, enterprise providers)
   - Claw-EE maps this to air-gap attestation, runtime DNS/IP revalidation, TLS/mTLS hardening, and signed model registry policy.
 
@@ -22,6 +22,7 @@ Reference architecture source:
 
 - Hash-chained audit ledger (tamper-evident provenance trail).
 - Startup/runtime audit-chain integrity verification (`AUDIT_STARTUP_VERIFY_MODE`, `/_clawee/control/audit/verify`).
+- Strict modality envelope/payload schema checks with modality-specific size caps.
 - Economic circuit breaker (hourly/daily hard caps with suspension).
 - Fail-closed risk gate mode (`RISK_EVALUATOR_FAIL_MODE=block`) for evaluator outages.
 - Approval workflow for high-risk actions and high-risk outbound messages.

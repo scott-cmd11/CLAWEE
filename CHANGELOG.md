@@ -5,6 +5,8 @@
 - Added startup audit hash-chain verification with configurable fail mode (`AUDIT_STARTUP_VERIFY_MODE`).
 - Added `GET /_clawee/control/audit/verify` for runtime audit-integrity checks.
 - Added `verify-audit-chain` command in `scripts/security-tools.mjs` for offline/CI validation.
+- Added strict modality-ingest schema validation (`text|vision|audio|action`) with configurable payload size limits.
+- Added inbound channel text-size enforcement (`CHANNEL_INGRESS_MAX_TEXT_CHARS`) and explicit `413` responses for oversize payloads.
 
 ## 0.1.0
 

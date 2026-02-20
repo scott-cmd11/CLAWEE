@@ -35,6 +35,12 @@ export interface AppConfig {
   replayRedisUrl: string;
   replayRedisPrefix: string;
   auditStartupVerifyMode: AuditStartupVerifyMode;
+  modalityTextMaxPayloadBytes: number;
+  modalityVisionMaxPayloadBytes: number;
+  modalityAudioMaxPayloadBytes: number;
+  modalityActionMaxPayloadBytes: number;
+  modalityTextMaxChars: number;
+  channelIngressMaxTextChars: number;
   pricingCatalogPath: string;
   hourlyUsdCap: number;
   dailyUsdCap: number;
@@ -232,6 +238,12 @@ export function loadConfig(): AppConfig {
       "block",
       ["off", "warn", "block"],
     ),
+    modalityTextMaxPayloadBytes: numberEnv("MODALITY_TEXT_MAX_PAYLOAD_BYTES", 65536),
+    modalityVisionMaxPayloadBytes: numberEnv("MODALITY_VISION_MAX_PAYLOAD_BYTES", 1048576),
+    modalityAudioMaxPayloadBytes: numberEnv("MODALITY_AUDIO_MAX_PAYLOAD_BYTES", 1048576),
+    modalityActionMaxPayloadBytes: numberEnv("MODALITY_ACTION_MAX_PAYLOAD_BYTES", 65536),
+    modalityTextMaxChars: numberEnv("MODALITY_TEXT_MAX_CHARS", 16000),
+    channelIngressMaxTextChars: numberEnv("CHANNEL_INGRESS_MAX_TEXT_CHARS", 8000),
     pricingCatalogPath,
     hourlyUsdCap: numberEnv("HOURLY_USD_CAP", 15),
     dailyUsdCap: numberEnv("DAILY_USD_CAP", 150),
