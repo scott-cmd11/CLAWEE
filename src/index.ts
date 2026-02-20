@@ -30,8 +30,11 @@ import { loadSignedPolicyCatalog } from "./policy-catalog";
 import { PolicyEngine } from "./policy-engine";
 import { createReplayStore } from "./replay-store";
 import { RuntimeEgressGuard } from "./runtime-egress-guard";
+import { SecurityConformanceService } from "./security-conformance";
+import { SecurityInvariantRegistry } from "./security-invariants";
 import { buildTransportAgents } from "./transport-security";
 import { startUncertaintyGate } from "./uncertainty-gate";
+import { sha256Hex, stableStringify } from "./utils";
 
 function printBanner(port: number, upstreamBaseUrl: string): void {
   const banner = `
@@ -236,6 +239,30 @@ async function main(): Promise<void> {
     registry_fingerprint: modelRegistry.getFingerprint(),
     evaluator_model: config.evaluatorModel,
   });
+  const invariantRegistry = new SecurityInvariantRegistry();
+  const codeFingerprint = sha256Hex(
+    stableStringify({
+      policy_fingerprint: policyCatalog.fingerprint,
+      approval_policy: approvalPolicy.getState(),
+      capability_policy: capabilityPolicy.getState(),
+      model_registry_fingerprint: modelRegistry.getFingerprint(),
+      replay_store_mode: config.replayStoreMode,
+      security_invariants_enforcement: config.securityInvariantsEnforcement,
+    }),
+  );
+  const securityConformanceService = new SecurityConformanceService({
+    defaultExportPath: config.securityConformanceExportPath,
+    codeFingerprint,
+    runtimeContext: {
+      enforcement_mode: config.enforcementMode,
+      risk_evaluator_fail_mode: config.riskEvaluatorFailMode,
+      security_invariants_enforcement: config.securityInvariantsEnforcement,
+      model_registry_fingerprint: modelRegistry.getFingerprint(),
+      replay_store_mode: config.replayStoreMode,
+    },
+    signingKey: config.securityConformanceSigningKey,
+    signingKeyringPath: config.securityConformanceSigningKeyringPath,
+  });
 
   let transportAgents;
   try {
@@ -340,6 +367,7 @@ async function main(): Promise<void> {
       evaluatorModel: config.evaluatorModel,
       riskEvaluatorFailMode: config.riskEvaluatorFailMode,
       auditStartupVerifyMode: config.auditStartupVerifyMode,
+      securityInvariantsEnforcement: config.securityInvariantsEnforcement,
       modelRegistryFingerprint: modelRegistry.getFingerprint(),
       enforcementMode: config.enforcementMode,
       controlAuthz,
@@ -383,6 +411,8 @@ async function main(): Promise<void> {
     channelDestinationPolicy,
     approvalAttestationService,
     auditAttestationService,
+    invariantRegistry,
+    securityConformanceService,
     {
       reloadPolicyCatalog: () => {
         const reloaded = loadSignedPolicyCatalog(

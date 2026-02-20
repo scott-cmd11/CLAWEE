@@ -10,6 +10,7 @@
     "security:tool": "node scripts/security-tools.mjs",
     "smoke:security": "npm.cmd run build && node tests/security-smoke.mjs && node tests/gate-integration-smoke.mjs && node tests/replay-redis-smoke.mjs",
     "smoke:redis-replay": "npm.cmd run build && node tests/replay-redis-smoke.mjs",
+    "security:invariants": "node scripts/security-invariants-check.mjs",
     "repo:check": "node scripts/repo-check.mjs",
     "release:notes": "node scripts/generate-release-notes.mjs"
   },

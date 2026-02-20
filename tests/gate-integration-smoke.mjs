@@ -31,7 +31,10 @@ import { ModalityHub } from "../dist/modality-hub.js";
 import { loadSignedPolicyCatalog } from "../dist/policy-catalog.js";
 import { PolicyEngine } from "../dist/policy-engine.js";
 import { RuntimeEgressGuard } from "../dist/runtime-egress-guard.js";
+import { SecurityConformanceService } from "../dist/security-conformance.js";
+import { SecurityInvariantRegistry } from "../dist/security-invariants.js";
 import { startUncertaintyGate } from "../dist/uncertainty-gate.js";
+import { sha256Hex, stableStringify } from "../dist/utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -244,6 +247,7 @@ async function main() {
     path.join(tmpDir, "audit-attestation.json"),
     "",
   );
+  const invariantRegistry = new SecurityInvariantRegistry();
   const policyCatalog = loadSignedPolicyCatalog(
     path.join(projectRoot, "config", "policy-catalog.v1.json"),
     "change_me_policy_key",
@@ -266,6 +270,20 @@ async function main() {
     "change_me_registry_key",
   );
   modelRegistry.init();
+  const conformanceService = new SecurityConformanceService({
+    defaultExportPath: path.join(tmpDir, "security-conformance.json"),
+    codeFingerprint: sha256Hex(
+      stableStringify({
+        policy: policyCatalog.fingerprint,
+        model_registry: modelRegistry.getFingerprint(),
+      }),
+    ),
+    runtimeContext: {
+      environment: "test",
+      mode: "smoke",
+    },
+    signingKey: "",
+  });
   const runtimeEgressGuard = new RuntimeEgressGuard({
     policy: "deny",
     allowlistedHosts: [],
@@ -350,6 +368,7 @@ async function main() {
         evaluatorModel: "gpt-4.1-mini",
         riskEvaluatorFailMode: "block",
         auditStartupVerifyMode: "block",
+        securityInvariantsEnforcement: "block",
         modelRegistryFingerprint: modelRegistry.getFingerprint(),
         enforcementMode: "block",
         controlAuthz,
@@ -388,6 +407,8 @@ async function main() {
       destinationPolicy,
       approvalAttestationService,
       auditAttestationService,
+      invariantRegistry,
+      conformanceService,
       {
         reloadApprovalPolicyCatalog: () => {
           const reloaded = loadSignedApprovalPolicyCatalog(
@@ -971,6 +992,60 @@ async function main() {
     const auditVerifySnapshotJson = await auditVerifySnapshotRes.json();
     assert.equal(auditVerifySnapshotJson.ok, true);
 
+    const invariantsRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/security/invariants`,
+      {
+        headers: {
+          authorization: `Bearer ${controlToken}`,
+        },
+      },
+    );
+    assert.equal(invariantsRes.status, 200);
+    const invariantsJson = await invariantsRes.json();
+    assert.equal(typeof invariantsJson.definition_hash, "string");
+    assert.equal(invariantsJson.enforcement_mode, "block");
+    assert.ok(Array.isArray(invariantsJson.invariants));
+
+    const conformanceReportPath = path.join(tmpDir, "security-conformance-report.json");
+    const conformanceChainPath = path.join(tmpDir, "security-conformance-chain.jsonl");
+    const conformanceExportRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/security/conformance/export`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          report_path: conformanceReportPath,
+          chain_path: conformanceChainPath,
+        }),
+      },
+    );
+    assert.equal(conformanceExportRes.status, 200);
+    const conformanceExportJson = await conformanceExportRes.json();
+    assert.equal(conformanceExportJson.ok, true);
+    assert.equal(fs.existsSync(conformanceReportPath), true);
+    assert.equal(fs.existsSync(conformanceChainPath), true);
+
+    const conformanceVerifyRes = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/security/conformance/verify`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          report_path: conformanceReportPath,
+          chain_path: conformanceChainPath,
+        }),
+      },
+    );
+    assert.equal(conformanceVerifyRes.status, 200);
+    const conformanceVerifyJson = await conformanceVerifyRes.json();
+    assert.equal(conformanceVerifyJson.ok, true);
+
     const signingReloadDenied = await fetch(
       `http://127.0.0.1:${gatePort}/_clawee/control/reload/approval-attestation-signing`,
       {
@@ -1001,6 +1076,16 @@ async function main() {
       },
     );
     assert.equal(auditSigningReloadAllowed.status, 200);
+    const conformanceSigningReloadAllowed = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/reload/security-conformance-signing`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${controlToken}`,
+        },
+      },
+    );
+    assert.equal(conformanceSigningReloadAllowed.status, 200);
   } finally {
     if (gate) {
       await gate.close();

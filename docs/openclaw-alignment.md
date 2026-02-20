@@ -23,6 +23,7 @@ Reference architecture source:
 - Hash-chained audit ledger (tamper-evident provenance trail).
 - Startup/runtime audit-chain integrity verification (`AUDIT_STARTUP_VERIFY_MODE`, `/_clawee/control/audit/verify`).
 - Audit attestation export/verification with sealed append-only snapshot chain.
+- Runtime security invariants registry and conformance artifact export/verification.
 - Strict modality envelope/payload schema checks with modality-specific size caps.
 - Economic circuit breaker (hourly/daily hard caps with suspension).
 - Fail-closed risk gate mode (`RISK_EVALUATOR_FAIL_MODE=block`) for evaluator outages.
@@ -47,6 +48,6 @@ Reference architecture source:
 
 ## Remaining roadmap (not fully solved in current MVP)
 
-- Formal non-bypass proofs for every critical action path.
+- Formal machine-checked proofs for every critical action path (current implementation is runtime/static enforcement, not theorem-proved).
 - Postgres replay backend for horizontally scaled multi-node deployments (Redis mode is implemented).
 - Deep causal failure diagnosis loop for long-running autonomous plans.

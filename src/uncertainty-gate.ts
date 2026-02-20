@@ -21,7 +21,12 @@ import { ChannelHub, type ChannelKind } from "./channel-hub";
 import { ChannelDeliveryService } from "./channel-delivery-service";
 import { ChannelDestinationPolicy } from "./channel-destination-policy";
 import { BudgetController, type CostEstimate } from "./budget-controller";
-import type { AuditStartupVerifyMode, EnforcementMode, RiskEvaluatorFailMode } from "./config";
+import type {
+  AuditStartupVerifyMode,
+  EnforcementMode,
+  RiskEvaluatorFailMode,
+  SecurityInvariantsEnforcement,
+} from "./config";
 import { type ControlPermission, type ControlIdentity, ControlAuthz } from "./control-authz";
 import type { RiskEvaluator, ToolIntent } from "./inference-provider";
 import { InteractionStore } from "./interaction-store";
@@ -32,6 +37,8 @@ import { PolicyEngine } from "./policy-engine";
 import { FixedWindowRateLimiter } from "./rate-limiter";
 import { ReplayStore } from "./replay-store";
 import { RuntimeEgressGuard, RuntimeEgressPolicyError } from "./runtime-egress-guard";
+import { SecurityConformanceService } from "./security-conformance";
+import { SecurityInvariantRegistry } from "./security-invariants";
 import { sha256Hex, stableStringify } from "./utils";
 
 export interface UncertaintyGateOptions {
@@ -41,6 +48,7 @@ export interface UncertaintyGateOptions {
   evaluatorModel: string;
   riskEvaluatorFailMode: RiskEvaluatorFailMode;
   auditStartupVerifyMode: AuditStartupVerifyMode;
+  securityInvariantsEnforcement: SecurityInvariantsEnforcement;
   modelRegistryFingerprint: string;
   enforcementMode: EnforcementMode;
   controlAuthz: ControlAuthz;
@@ -492,6 +500,8 @@ export async function startUncertaintyGate(
   channelDestinationPolicy: ChannelDestinationPolicy,
   approvalAttestationService: ApprovalAttestationService,
   auditAttestationService: AuditAttestationService,
+  invariantRegistry: SecurityInvariantRegistry,
+  securityConformanceService: SecurityConformanceService,
   reloadHandlers?: {
     reloadPolicyCatalog?: () => { fingerprint: string };
     reloadModelRegistry?: () => { fingerprint: string };
@@ -537,6 +547,30 @@ export async function startUncertaintyGate(
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  };
+  const invariantCheck = (input: {
+    id: string;
+    passed: boolean;
+    reason?: string;
+    context?: Record<string, unknown>;
+    securityDecisionId?: string;
+  }): boolean => {
+    invariantRegistry.check({
+      id: input.id,
+      passed: input.passed,
+      reason: input.reason,
+      context: input.context,
+    });
+    if (!input.passed) {
+      ledger.logAndSignAction("SECURITY_INVARIANT_VIOLATION", {
+        invariant_id: input.id,
+        reason: input.reason || "invariant failed",
+        context: input.context || null,
+        security_decision_id: input.securityDecisionId || null,
+      });
+      return options.securityInvariantsEnforcement !== "block";
+    }
+    return true;
   };
 
   app.use(
@@ -615,6 +649,8 @@ export async function startUncertaintyGate(
     const destinationPolicyState = channelDestinationPolicy.getState();
     const attestationSigning = approvalAttestationService.getSigningState();
     const auditAttestationSigning = auditAttestationService.getSigningState();
+    const securityConformanceSigning = securityConformanceService.getSigningState();
+    const securityInvariantsSummary = invariantRegistry.summary();
     const capabilityPolicyState = capabilityPolicy.getState();
     const approvalPolicyState = approvalPolicy.getState();
     const replayStoreState = replayStore.getState();
@@ -623,6 +659,7 @@ export async function startUncertaintyGate(
       warn_threshold: options.warnThreshold,
       risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
       audit_startup_verify_mode: options.auditStartupVerifyMode,
+      security_invariants_enforcement: options.securityInvariantsEnforcement,
       max_request_input_tokens: options.maxRequestInputTokens,
       max_request_output_tokens: options.maxRequestOutputTokens,
       channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
@@ -644,6 +681,11 @@ export async function startUncertaintyGate(
       channel_destination_policy: destinationPolicyState,
       approval_attestation_signing: attestationSigning,
       audit_attestation_signing: auditAttestationSigning,
+      security_conformance_signing: securityConformanceSigning,
+      security_invariants: {
+        summary: securityInvariantsSummary,
+        definition_hash: invariantRegistry.definitionHash(),
+      },
       approval_policy: approvalPolicyState,
       capability_policy: capabilityPolicyState,
       replay_store: replayStoreState,
@@ -785,6 +827,74 @@ export async function startUncertaintyGate(
     });
   });
 
+  app.get("/_clawee/control/security/invariants", controlAuth("system.read"), (_req, res) => {
+    res.json({
+      enforcement_mode: options.securityInvariantsEnforcement,
+      definition_hash: invariantRegistry.definitionHash(),
+      summary: invariantRegistry.summary(),
+      invariants: invariantRegistry.list(),
+    });
+  });
+
+  app.post("/_clawee/control/security/conformance/export", controlAuth("audit.read"), (req, res) => {
+    try {
+      const payload = securityConformanceService.generate({
+        invariantCatalogHash: invariantRegistry.definitionHash(),
+        summary: invariantRegistry.summary(),
+        invariants: invariantRegistry.list(),
+      });
+      const reportPath = typeof req.body?.report_path === "string" ? req.body.report_path : "";
+      const chainPath = typeof req.body?.chain_path === "string" ? req.body.chain_path : "";
+      const exported = securityConformanceService.exportSealedSnapshot(payload, {
+        reportPath,
+        chainPath,
+      });
+      ledger.logAndSignAction("SECURITY_CONFORMANCE_EXPORTED", {
+        report_path: exported.report_path,
+        chain_path: exported.chain_path,
+        report_hash: exported.report_hash,
+        current_hash: exported.current_hash,
+        previous_hash: exported.previous_hash,
+      });
+      res.json({
+        ok: true,
+        ...exported,
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/security/conformance/verify", controlAuth("audit.read"), (req, res) => {
+    const reportPath = typeof req.body?.report_path === "string" ? req.body.report_path : "";
+    const chainPath = typeof req.body?.chain_path === "string" ? req.body.chain_path : "";
+    if (!reportPath) {
+      res.status(400).json({ error: "report_path is required." });
+      return;
+    }
+    try {
+      const snapshot = securityConformanceService.verifySnapshotFile(reportPath);
+      const chain = chainPath
+        ? securityConformanceService.verifySealedChain(chainPath, { verifySnapshots: true })
+        : null;
+      const valid = snapshot.valid && (chain ? chain.valid : true);
+      ledger.logAndSignAction("SECURITY_CONFORMANCE_VERIFIED", {
+        report_path: reportPath,
+        chain_path: chainPath || null,
+        valid,
+        snapshot_valid: snapshot.valid,
+        chain_valid: chain?.valid ?? null,
+      });
+      res.status(valid ? 200 : 409).json({
+        ok: valid,
+        snapshot,
+        chain,
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get("/_clawee/control/audit/attestation", controlAuth("audit.read"), (req, res) => {
     const rawLimit = Number(req.query.limit || 1000);
     const limit = Number.isNaN(rawLimit) ? 1000 : rawLimit;
@@ -898,6 +1008,8 @@ export async function startUncertaintyGate(
     const destinationPolicyState = channelDestinationPolicy.getState();
     const attestationSigning = approvalAttestationService.getSigningState();
     const auditAttestationSigning = auditAttestationService.getSigningState();
+    const securityConformanceSigning = securityConformanceService.getSigningState();
+    const securityInvariantsSummary = invariantRegistry.summary();
     const capabilityPolicyState = capabilityPolicy.getState();
     const approvalPolicyState = approvalPolicy.getState();
     const replayStoreState = replayStore.getState();
@@ -907,6 +1019,7 @@ export async function startUncertaintyGate(
       timestamp: new Date().toISOString(),
       risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
       audit_startup_verify_mode: options.auditStartupVerifyMode,
+      security_invariants_enforcement: options.securityInvariantsEnforcement,
       max_request_input_tokens: options.maxRequestInputTokens,
       max_request_output_tokens: options.maxRequestOutputTokens,
       channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
@@ -934,6 +1047,11 @@ export async function startUncertaintyGate(
       channel_destination_policy: destinationPolicyState,
       approval_attestation_signing: attestationSigning,
       audit_attestation_signing: auditAttestationSigning,
+      security_conformance_signing: securityConformanceSigning,
+      security_invariants: {
+        summary: securityInvariantsSummary,
+        definition_hash: invariantRegistry.definitionHash(),
+      },
       approval_policy: approvalPolicyState,
       capability_policy: capabilityPolicyState,
       replay_store: replayStoreState,
@@ -1116,8 +1234,20 @@ export async function startUncertaintyGate(
     }
   });
 
+  app.post("/_clawee/control/reload/security-conformance-signing", controlAuth("audit.read"), (_req, res) => {
+    try {
+      const state = securityConformanceService.reloadSigningKeys();
+      res.json({ ok: true, ...state });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.post("/_clawee/control/channel/send", controlAuth("channel.send"), (req, res) => {
     const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+    const securityDecisionId = sha256Hex(
+      `${Date.now()}|control-channel-send|${requestFingerprint(req)}`,
+    );
     const channel = parseChannelKind(String(req.body?.channel || ""));
     const destination = typeof req.body?.destination === "string" ? req.body.destination : "";
     const text = typeof req.body?.text === "string" ? req.body.text : "";
@@ -1141,6 +1271,18 @@ export async function startUncertaintyGate(
     }
     const channelActionDecision = capabilityPolicy.evaluateChannelAction("channel.send", channel);
     if (!channelActionDecision.allowed) {
+      invariantCheck({
+        id: "INV-002-CAPABILITY-GATE",
+        passed: true,
+        reason: "channel send blocked by capability policy",
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          channel,
+          action: "channel.send",
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
         path: req.originalUrl,
         method: req.method,
@@ -1148,6 +1290,7 @@ export async function startUncertaintyGate(
         action: "channel.send",
         reason: channelActionDecision.reason,
         matched_signals: channelActionDecision.matchedSignals,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "capability_blocked_action",
@@ -1169,8 +1312,30 @@ export async function startUncertaintyGate(
       });
       return;
     }
+    invariantCheck({
+      id: "INV-002-CAPABILITY-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        channel,
+        action: "channel.send",
+      },
+      securityDecisionId,
+    });
     const destinationDecision = channelDestinationPolicy.evaluate(channel, destination);
     if (!destinationDecision.allowed) {
+      invariantCheck({
+        id: "INV-007-CHANNEL-DESTINATION-GATE",
+        passed: true,
+        reason: "destination policy blocked outbound channel",
+        context: {
+          stage: "queue",
+          channel,
+          destination,
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("CHANNEL_DESTINATION_BLOCKED", {
         stage: "queue",
         channel,
@@ -1178,6 +1343,7 @@ export async function startUncertaintyGate(
         reason: destinationDecision.reason,
         matched_pattern: destinationDecision.matched_pattern,
         source: destinationDecision.source,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "channel_destination_blocked",
@@ -1198,6 +1364,16 @@ export async function startUncertaintyGate(
       });
       return;
     }
+    invariantCheck({
+      id: "INV-007-CHANNEL-DESTINATION-GATE",
+      passed: true,
+      context: {
+        stage: "queue",
+        channel,
+        destination,
+      },
+      securityDecisionId,
+    });
     const policyDecision = policyEngine.evaluate({
       path: req.originalUrl,
       method: req.method,
@@ -1211,6 +1387,16 @@ export async function startUncertaintyGate(
       modality: "text",
       intent: { hasToolIntent: false, toolNames: [] },
     });
+    invariantCheck({
+      id: "INV-003-POLICY-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        decision: policyDecision.decision,
+      },
+      securityDecisionId,
+    });
     let approvedRequest: { id: string; fingerprint: string } | null = null;
     if (policyDecision.decision === "block") {
       ledger.logAndSignAction("POLICY_BLOCKED_ACTION", {
@@ -1220,6 +1406,7 @@ export async function startUncertaintyGate(
         modality: "text",
         reason: policyDecision.reason,
         matched_signals: policyDecision.matchedSignals,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "policy_blocked_action",
@@ -1268,11 +1455,23 @@ export async function startUncertaintyGate(
           requiredRoles: approvalRequirements.requiredRoles,
           maxUses: options.approvalMaxUses,
         });
+        invariantCheck({
+          id: "INV-004-APPROVAL-GATE",
+          passed: true,
+          reason: "approval required and request blocked pending quorum",
+          context: {
+            path: req.originalUrl,
+            method: req.method,
+            approval_id: created.record.id,
+          },
+          securityDecisionId,
+        });
         if (created.created) {
           ledger.logAndSignAction("APPROVAL_CREATED", {
             approval_id: created.record.id,
             reason: created.record.reason,
             expires_at: created.record.expires_at,
+            security_decision_id: securityDecisionId,
           });
         }
         ledger.logAndSignAction("APPROVAL_REQUIRED", {
@@ -1283,6 +1482,7 @@ export async function startUncertaintyGate(
           signals: policyDecision.matchedSignals,
           required_approvals: created.record.required_approvals,
           required_roles: parseRequiredRoles(created.record.required_roles),
+          security_decision_id: securityDecisionId,
         });
         void sendAlert(
           "approval_required",
@@ -1315,6 +1515,17 @@ export async function startUncertaintyGate(
         id: approvalId,
         fingerprint,
       };
+      invariantCheck({
+        id: "INV-004-APPROVAL-GATE",
+        passed: true,
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          approval_id: approvalId,
+          stage: "approved-request",
+        },
+        securityDecisionId,
+      });
     }
     if (approvedRequest) {
       const consumed = approvalService.consumeApproved(
@@ -1326,6 +1537,7 @@ export async function startUncertaintyGate(
           approval_id: approvedRequest.id,
           path: req.originalUrl,
           method: req.method,
+          security_decision_id: securityDecisionId,
         });
         res.status(428).json({
           error: "Approval token is expired or already consumed.",
@@ -1337,6 +1549,7 @@ export async function startUncertaintyGate(
         path: req.originalUrl,
         method: req.method,
         source: "request-header",
+        security_decision_id: securityDecisionId,
       });
     }
     const queued = channelHub.queueOutbound({
@@ -1350,6 +1563,7 @@ export async function startUncertaintyGate(
       channel,
       destination,
       message_id: queued.id,
+      security_decision_id: securityDecisionId,
     });
     persistInteraction("interaction-store:channel-outbound", () => {
       interactionStore.recordChannelOutbound(queued);
@@ -1446,6 +1660,16 @@ export async function startUncertaintyGate(
         options.channelIngressMaxSkewSeconds,
       );
       if (!signatureCheck.ok) {
+        invariantCheck({
+          id: "INV-008-INGRESS-AUTH-GATE",
+          passed: true,
+          reason: signatureCheck.reason,
+          context: {
+            path: req.originalUrl,
+            method: req.method,
+            stage: "signature",
+          },
+        });
         ledger.logAndSignAction("CHANNEL_INGRESS_SIGNATURE_DENIED", {
           path: req.originalUrl,
           method: req.method,
@@ -1461,6 +1685,16 @@ export async function startUncertaintyGate(
           options.channelIngressMaxSkewSeconds,
         );
         if (!accepted) {
+          invariantCheck({
+            id: "INV-008-INGRESS-AUTH-GATE",
+            passed: true,
+            reason: "nonce replay blocked",
+            context: {
+              path: req.originalUrl,
+              method: req.method,
+              stage: "nonce-replay",
+            },
+          });
           ledger.logAndSignAction("CHANNEL_INGRESS_REPLAY_BLOCKED", {
             path: req.originalUrl,
             method: req.method,
@@ -1477,6 +1711,16 @@ export async function startUncertaintyGate(
           options.channelIngressEventTtlSeconds,
         );
         if (!accepted) {
+          invariantCheck({
+            id: "INV-008-INGRESS-AUTH-GATE",
+            passed: true,
+            reason: "event replay blocked",
+            context: {
+              path: req.originalUrl,
+              method: req.method,
+              stage: "event-replay",
+            },
+          });
           ledger.logAndSignAction("CHANNEL_INGRESS_EVENT_REPLAY_BLOCKED", {
             path: req.originalUrl,
             method: req.method,
@@ -1490,6 +1734,16 @@ export async function startUncertaintyGate(
       if (channel) {
         const channelActionDecision = capabilityPolicy.evaluateChannelAction("channel.ingest", channel);
         if (!channelActionDecision.allowed) {
+          invariantCheck({
+            id: "INV-002-CAPABILITY-GATE",
+            passed: true,
+            reason: "channel ingest capability blocked",
+            context: {
+              path: req.originalUrl,
+              method: req.method,
+              channel,
+            },
+          });
           ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
             path: req.originalUrl,
             method: req.method,
@@ -1505,7 +1759,26 @@ export async function startUncertaintyGate(
           });
           return;
         }
+        invariantCheck({
+          id: "INV-002-CAPABILITY-GATE",
+          passed: true,
+          context: {
+            path: req.originalUrl,
+            method: req.method,
+            channel,
+            action: "channel.ingest",
+          },
+        });
       }
+      invariantCheck({
+        id: "INV-008-INGRESS-AUTH-GATE",
+        passed: true,
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          stage: "accepted",
+        },
+      });
       next();
     })().catch((error) => {
       ledger.logAndSignAction("SYSTEM_ERROR", {
@@ -1625,17 +1898,41 @@ export async function startUncertaintyGate(
     if (isControlPath(req.path) || isChannelIngressPath(req.path) || req.method === "GET" || req.method === "HEAD") {
       return next();
     }
+    const securityDecisionId = sha256Hex(`${Date.now()}|${req.method}|${requestFingerprint(req)}`);
+    (req as Request & { __claweeSecurityDecisionId?: string }).__claweeSecurityDecisionId =
+      securityDecisionId;
 
     try {
       await runtimeEgressGuard.assertAllowed("upstream_base_url");
+      invariantCheck({
+        id: "INV-001-RUNTIME-EGRESS-GATE",
+        passed: true,
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+        },
+        securityDecisionId,
+      });
     } catch (error) {
       const details =
         error instanceof RuntimeEgressPolicyError ? error.result : { reason: String(error) };
+      invariantCheck({
+        id: "INV-001-RUNTIME-EGRESS-GATE",
+        passed: true,
+        reason: "request blocked by runtime egress policy",
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          details,
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("RUNTIME_EGRESS_BLOCKED", {
         path: req.originalUrl,
         method: req.method,
         target: "upstream_base_url",
         details,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "runtime_egress_blocked",
@@ -1660,6 +1957,18 @@ export async function startUncertaintyGate(
     const channelHint = extractChannelHint(req.body);
     const capabilityToolDecision = capabilityPolicy.evaluateToolExecution(intent.toolNames, channelHint);
     if (!capabilityToolDecision.allowed) {
+      invariantCheck({
+        id: "INV-002-CAPABILITY-GATE",
+        passed: true,
+        reason: "capability policy blocked tool execution",
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          tools: intent.toolNames,
+          channel_hint: channelHint || null,
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
         path: req.originalUrl,
         method: req.method,
@@ -1669,6 +1978,7 @@ export async function startUncertaintyGate(
         channel_hint: channelHint || null,
         reason: capabilityToolDecision.reason,
         matched_signals: capabilityToolDecision.matchedSignals,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "capability_blocked_action",
@@ -1692,6 +2002,17 @@ export async function startUncertaintyGate(
       });
       return;
     }
+    invariantCheck({
+      id: "INV-002-CAPABILITY-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        tools: intent.toolNames,
+        channel_hint: channelHint || null,
+      },
+      securityDecisionId,
+    });
     const inputTokens = estimateInputTokens(req.body);
     const outputTokens = extractOutputTokens(req.body);
     if (inputTokens > Math.max(1, Math.floor(options.maxRequestInputTokens))) {
@@ -1728,12 +2049,25 @@ export async function startUncertaintyGate(
     }
     const modelPolicy = modelRegistry.evaluate(model, modality);
     if (!modelPolicy.allowed) {
+      invariantCheck({
+        id: "INV-006-MODEL-REGISTRY-GATE",
+        passed: true,
+        reason: "model registry denied model/modality",
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          model,
+          modality,
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("MODEL_POLICY_BLOCKED", {
         path: req.originalUrl,
         method: req.method,
         model,
         modality,
         reason: modelPolicy.reason,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "model_policy_blocked",
@@ -1752,6 +2086,17 @@ export async function startUncertaintyGate(
       });
       return;
     }
+    invariantCheck({
+      id: "INV-006-MODEL-REGISTRY-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        model,
+        modality,
+      },
+      securityDecisionId,
+    });
 
     const policyDecision = policyEngine.evaluate({
       path: req.originalUrl,
@@ -1760,6 +2105,16 @@ export async function startUncertaintyGate(
       model,
       modality,
       intent,
+    });
+    invariantCheck({
+      id: "INV-003-POLICY-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        decision: policyDecision.decision,
+      },
+      securityDecisionId,
     });
     let approvedRequest: { id: string; fingerprint: string } | null = null;
     if (policyDecision.decision === "block") {
@@ -1770,6 +2125,7 @@ export async function startUncertaintyGate(
         modality,
         reason: policyDecision.reason,
         matched_signals: policyDecision.matchedSignals,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "policy_blocked_action",
@@ -1819,11 +2175,23 @@ export async function startUncertaintyGate(
           requiredRoles: approvalRequirements.requiredRoles,
           maxUses: options.approvalMaxUses,
         });
+        invariantCheck({
+          id: "INV-004-APPROVAL-GATE",
+          passed: true,
+          reason: "approval required and action blocked pending human approval",
+          context: {
+            path: req.originalUrl,
+            method: req.method,
+            approval_id: created.record.id,
+          },
+          securityDecisionId,
+        });
         if (created.created) {
           ledger.logAndSignAction("APPROVAL_CREATED", {
             approval_id: created.record.id,
             reason: created.record.reason,
             expires_at: created.record.expires_at,
+            security_decision_id: securityDecisionId,
           });
         }
         ledger.logAndSignAction("APPROVAL_REQUIRED", {
@@ -1834,6 +2202,7 @@ export async function startUncertaintyGate(
           signals: policyDecision.matchedSignals,
           required_approvals: created.record.required_approvals,
           required_roles: parseRequiredRoles(created.record.required_roles),
+          security_decision_id: securityDecisionId,
         });
         void sendAlert(
           "approval_required",
@@ -1866,6 +2235,17 @@ export async function startUncertaintyGate(
         id: approvalId,
         fingerprint,
       };
+      invariantCheck({
+        id: "INV-004-APPROVAL-GATE",
+        passed: true,
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          approval_id: approvalId,
+          stage: "approval-token-present",
+        },
+        securityDecisionId,
+      });
     }
 
     let estimate: CostEstimate;
@@ -1883,11 +2263,24 @@ export async function startUncertaintyGate(
 
     const budgetDecision = budgetController.evaluateProjected(estimate);
     if (budgetDecision.decision === "suspend") {
+      invariantCheck({
+        id: "INV-005-BUDGET-GATE",
+        passed: true,
+        reason: "budget gate blocked forwarding",
+        context: {
+          path: req.originalUrl,
+          method: req.method,
+          model,
+          estimated_usd: estimate.estimatedUsd,
+        },
+        securityDecisionId,
+      });
       ledger.logAndSignAction("BUDGET_SUSPENDED", {
         reason: budgetDecision.reason || "Budget cap exceeded.",
         path: req.originalUrl,
         model,
         estimated_usd: estimate.estimatedUsd,
+        security_decision_id: securityDecisionId,
       });
       void sendAlert(
         "budget_suspended",
@@ -1906,6 +2299,16 @@ export async function startUncertaintyGate(
       });
       return;
     }
+    invariantCheck({
+      id: "INV-005-BUDGET-GATE",
+      passed: true,
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+        model,
+      },
+      securityDecisionId,
+    });
 
     (req as Request & { __claweeCostEstimate?: CostEstimate }).__claweeCostEstimate = estimate;
 
@@ -1916,10 +2319,22 @@ export async function startUncertaintyGate(
           approvedRequest.fingerprint,
         );
         if (!consumed) {
+          invariantCheck({
+            id: "INV-004-APPROVAL-GATE",
+            passed: true,
+            reason: "approval token replay blocked",
+            context: {
+              path: req.originalUrl,
+              method: req.method,
+              approval_id: approvedRequest.id,
+            },
+            securityDecisionId,
+          });
           ledger.logAndSignAction("APPROVAL_TOKEN_REPLAY_BLOCKED", {
             approval_id: approvedRequest.id,
             path: req.originalUrl,
             method: req.method,
+            security_decision_id: securityDecisionId,
           });
           res.status(428).json({
             error: "Approval token is expired or already consumed.",
@@ -1932,6 +2347,7 @@ export async function startUncertaintyGate(
           method: req.method,
           source: "request-header",
           consumed: true,
+          security_decision_id: securityDecisionId,
         });
       }
       return next();
@@ -1952,6 +2368,7 @@ export async function startUncertaintyGate(
         method: req.method,
         risk,
         tools: intent.toolNames,
+        security_decision_id: securityDecisionId,
       });
 
       if (risk.confidence_score < options.warnThreshold) {
@@ -1962,6 +2379,7 @@ export async function startUncertaintyGate(
             threshold: options.warnThreshold,
             risk,
             mode: options.enforcementMode,
+            security_decision_id: securityDecisionId,
           });
           void sendAlert(
             "risk_blocked_action",
@@ -1988,6 +2406,7 @@ export async function startUncertaintyGate(
           threshold: options.warnThreshold,
           risk,
           mode: options.enforcementMode,
+          security_decision_id: securityDecisionId,
         });
       }
 
@@ -1997,10 +2416,22 @@ export async function startUncertaintyGate(
           approvedRequest.fingerprint,
         );
         if (!consumed) {
+          invariantCheck({
+            id: "INV-004-APPROVAL-GATE",
+            passed: true,
+            reason: "approval token replay blocked",
+            context: {
+              path: req.originalUrl,
+              method: req.method,
+              approval_id: approvedRequest.id,
+            },
+            securityDecisionId,
+          });
           ledger.logAndSignAction("APPROVAL_TOKEN_REPLAY_BLOCKED", {
             approval_id: approvedRequest.id,
             path: req.originalUrl,
             method: req.method,
+            security_decision_id: securityDecisionId,
           });
           res.status(428).json({
             error: "Approval token is expired or already consumed.",
@@ -2013,6 +2444,18 @@ export async function startUncertaintyGate(
           method: req.method,
           source: "request-header",
           consumed: true,
+          security_decision_id: securityDecisionId,
+        });
+        invariantCheck({
+          id: "INV-004-APPROVAL-GATE",
+          passed: true,
+          context: {
+            path: req.originalUrl,
+            method: req.method,
+            approval_id: approvedRequest.id,
+            stage: "consumed",
+          },
+          securityDecisionId,
         });
       }
 
@@ -2025,6 +2468,7 @@ export async function startUncertaintyGate(
         path: req.originalUrl,
         message,
         risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
+        security_decision_id: securityDecisionId,
       });
       if (options.riskEvaluatorFailMode === "block") {
         void sendAlert(
@@ -2048,12 +2492,44 @@ export async function startUncertaintyGate(
         method: req.method,
         warning: "risk-evaluator-failed-open",
         message,
+        security_decision_id: securityDecisionId,
       });
       next();
     }
   };
 
   app.use(guardMiddleware);
+
+  app.use((req, res, next) => {
+    if (isControlPath(req.path) || isChannelIngressPath(req.path) || req.method === "GET" || req.method === "HEAD") {
+      next();
+      return;
+    }
+    const securityDecisionId = (
+      req as Request & { __claweeSecurityDecisionId?: string }
+    ).__claweeSecurityDecisionId;
+    if (securityDecisionId && securityDecisionId.length > 0) {
+      next();
+      return;
+    }
+    const allow = invariantCheck({
+      id: "INV-003-POLICY-GATE",
+      passed: false,
+      reason: "request reached forwarding stage without guard decision id",
+      context: {
+        path: req.originalUrl,
+        method: req.method,
+      },
+    });
+    if (!allow) {
+      res.status(500).json({
+        error: "Blocked by Claw-EE security invariant enforcement.",
+        reason: "guard coverage invariant failed",
+      });
+      return;
+    }
+    next();
+  });
 
   const proxy = createProxyMiddleware({
     target: options.upstreamBaseUrl,
@@ -2070,7 +2546,9 @@ export async function startUncertaintyGate(
           const reqWithState = req as Request & {
             __claweeCostEstimate?: CostEstimate;
             __claweeRisk?: unknown;
+            __claweeSecurityDecisionId?: string;
           };
+          const securityDecisionId = reqWithState.__claweeSecurityDecisionId || null;
           const estimate = reqWithState.__claweeCostEstimate || null;
           const contentType = String(proxyRes.headers["content-type"] || "");
 
@@ -2094,6 +2572,7 @@ export async function startUncertaintyGate(
               input_tokens: actual.inputTokens,
               output_tokens: actual.outputTokens,
               usd_cost: actual.estimatedUsd,
+              security_decision_id: securityDecisionId,
             });
           }
         } catch (error) {
@@ -2102,6 +2581,9 @@ export async function startUncertaintyGate(
             stage: "proxy-res",
             path: req.url,
             message: error instanceof Error ? error.message : String(error),
+            security_decision_id: (
+              req as Request & { __claweeSecurityDecisionId?: string }
+            ).__claweeSecurityDecisionId || null,
           });
         }
 
@@ -2111,6 +2593,9 @@ export async function startUncertaintyGate(
           method: req.method,
           status_code: statusCode,
           risk: (req as Request & { __claweeRisk?: unknown }).__claweeRisk ?? null,
+          security_decision_id: (
+            req as Request & { __claweeSecurityDecisionId?: string }
+          ).__claweeSecurityDecisionId || null,
         });
 
         return responseBuffer;

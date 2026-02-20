@@ -9,6 +9,7 @@ export type OutboundInternetPolicy = "deny" | "allow";
 export type RiskEvaluatorFailMode = "allow" | "block";
 export type ReplayStoreMode = "sqlite" | "redis";
 export type AuditStartupVerifyMode = "off" | "warn" | "block";
+export type SecurityInvariantsEnforcement = "warn" | "block";
 
 export interface AppConfig {
   port: number;
@@ -99,6 +100,10 @@ export interface AppConfig {
   approvalAttestationDefaultPath: string;
   approvalAttestationSigningKey: string;
   approvalAttestationSigningKeyringPath: string;
+  securityInvariantsEnforcement: SecurityInvariantsEnforcement;
+  securityConformanceExportPath: string;
+  securityConformanceSigningKey: string;
+  securityConformanceSigningKeyringPath: string;
   auditAttestationDefaultPath: string;
   auditAttestationSigningKey: string;
   auditAttestationSigningKeyringPath: string;
@@ -201,6 +206,9 @@ export function loadConfig(): AppConfig {
   const auditAttestationDefaultPath =
     process.env.AUDIT_ATTESTATION_DEFAULT_PATH?.trim() ||
     path.join(openclawHome, "audit_attestation.json");
+  const securityConformanceExportPath =
+    process.env.SECURITY_CONFORMANCE_EXPORT_PATH?.trim() ||
+    path.join(openclawHome, "security_conformance.json");
   const approvalPolicyCatalogPath =
     process.env.APPROVAL_POLICY_CATALOG_PATH?.trim() ||
     path.join(process.cwd(), "config", "approval-policy-catalog.v1.json");
@@ -327,6 +335,15 @@ export function loadConfig(): AppConfig {
     approvalAttestationSigningKey: process.env.APPROVAL_ATTESTATION_SIGNING_KEY?.trim() || "",
     approvalAttestationSigningKeyringPath:
       process.env.APPROVAL_ATTESTATION_SIGNING_KEYRING_PATH?.trim() || "",
+    securityInvariantsEnforcement: enumEnv<SecurityInvariantsEnforcement>(
+      "SECURITY_INVARIANTS_ENFORCEMENT",
+      "block",
+      ["warn", "block"],
+    ),
+    securityConformanceExportPath,
+    securityConformanceSigningKey: process.env.SECURITY_CONFORMANCE_SIGNING_KEY?.trim() || "",
+    securityConformanceSigningKeyringPath:
+      process.env.SECURITY_CONFORMANCE_SIGNING_KEYRING_PATH?.trim() || "",
     auditAttestationDefaultPath,
     auditAttestationSigningKey: process.env.AUDIT_ATTESTATION_SIGNING_KEY?.trim() || "",
     auditAttestationSigningKeyringPath:

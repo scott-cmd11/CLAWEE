@@ -39,6 +39,7 @@ Optional:
 - `REPLAY_STORE_MODE` (`sqlite` default, `redis` for cluster-shared replay defense)
 - `REPLAY_REDIS_URL` / `REPLAY_REDIS_PREFIX` (required when `REPLAY_STORE_MODE=redis`)
 - `AUDIT_STARTUP_VERIFY_MODE` (`block` default; `warn` or `off` for relaxed startup integrity handling)
+- `SECURITY_INVARIANTS_ENFORCEMENT` (`block` default; fail-closed invariant coverage enforcement)
 - `MODALITY_TEXT_MAX_PAYLOAD_BYTES` / `MODALITY_VISION_MAX_PAYLOAD_BYTES`
 - `MODALITY_AUDIO_MAX_PAYLOAD_BYTES` / `MODALITY_ACTION_MAX_PAYLOAD_BYTES`
 - `MODALITY_TEXT_MAX_CHARS` (schema cap for text modality payloads)
@@ -56,6 +57,8 @@ Optional:
 - `APPROVAL_ATTESTATION_SIGNING_KEYRING_PATH` (optional keyring for attestation signing rotation)
 - `AUDIT_ATTESTATION_DEFAULT_PATH` / `AUDIT_ATTESTATION_SIGNING_KEY`
 - `AUDIT_ATTESTATION_SIGNING_KEYRING_PATH` (optional keyring for audit-attestation signing rotation)
+- `SECURITY_CONFORMANCE_EXPORT_PATH` / `SECURITY_CONFORMANCE_SIGNING_KEY`
+- `SECURITY_CONFORMANCE_SIGNING_KEYRING_PATH` (optional keyring for conformance signing rotation)
 - `APPROVAL_ATTESTATION_PERIODIC_ENABLED`
 - `APPROVAL_ATTESTATION_PERIODIC_INTERVAL_SECONDS`
 - `APPROVAL_ATTESTATION_SNAPSHOT_DIRECTORY` / `APPROVAL_ATTESTATION_CHAIN_PATH`
@@ -87,6 +90,7 @@ Security smoke checks:
 ```powershell
 npm.cmd run smoke:security
 npm.cmd run repo:check
+npm.cmd run security:invariants
 npm.cmd run release:notes -- v0.1.0
 ```
 
@@ -152,6 +156,9 @@ By default, `CONTROL_API_TOKEN` has full access. If `CONTROL_TOKENS_PATH` is con
 - `GET /_clawee/control/audit/attestation?limit=1000&since=<iso8601>`
 - `POST /_clawee/control/audit/attestation/export`
 - `POST /_clawee/control/audit/attestation/verify`
+- `GET /_clawee/control/security/invariants`
+- `POST /_clawee/control/security/conformance/export`
+- `POST /_clawee/control/security/conformance/verify`
 - `POST /_clawee/control/modality/ingest`
 - `GET /_clawee/control/modality/recent?limit=100`
 - `GET /_clawee/control/channel/inbound?limit=100`
@@ -172,6 +179,7 @@ By default, `CONTROL_API_TOKEN` has full access. If `CONTROL_TOKENS_PATH` is con
 - `POST /_clawee/control/approvals/attestation/verify`
 - `POST /_clawee/control/reload/approval-attestation-signing`
 - `POST /_clawee/control/reload/audit-attestation-signing`
+- `POST /_clawee/control/reload/security-conformance-signing`
 
 Channel ingress endpoint (for corporate connectors):
 
@@ -185,6 +193,7 @@ Channel ingress endpoint (for corporate connectors):
 - `ENFORCEMENT_MODE=block` blocks low-confidence risky tool actions.
 - `RISK_EVALUATOR_FAIL_MODE=block` fails closed if the secondary risk evaluator is unavailable.
 - `AUDIT_STARTUP_VERIFY_MODE=block` fails startup if audit hash-chain integrity is broken.
+- `SECURITY_INVARIANTS_ENFORCEMENT=block` fails closed when invariant coverage checks detect bypass risk.
 - Modality ingest enforces strict per-modality schemas (`text|vision|audio|action`).
 - Modality and channel-ingress payload size limits return `413` when exceeded.
 - Budget caps are enforced via `HOURLY_USD_CAP` and `DAILY_USD_CAP`.
@@ -234,6 +243,7 @@ Channel ingress endpoint (for corporate connectors):
 - Example approval-policy keyring: `config/approval-policy-catalog-signing-keyring.v1.example.json`
 - Approval attestation exports produce hash-chained records and optional HMAC signature.
 - Audit attestation exports produce hash-chained records and optional HMAC signature.
+- Security conformance exports produce signed, sealed snapshot + chain evidence bundles.
 - Example attestation keyring: `config/approval-attestation-signing-keyring.v1.example.json`
 - `POST /_clawee/control/approvals/attestation/export` writes sealed snapshot + append-only chain (`snapshot_path`/`chain_path` optional in body).
 - Optional periodic attestation job can auto-export sealed snapshots on interval.

@@ -70,4 +70,58 @@ if (failures > 0) {
   process.exit(1);
 }
 
+const gatePath = path.join(root, "src", "uncertainty-gate.ts");
+const deliveryPath = path.join(root, "src", "channel-delivery-service.ts");
+
+if (!fs.existsSync(gatePath)) {
+  failures += 1;
+  console.error("missing: src/uncertainty-gate.ts");
+} else {
+  const gate = fs.readFileSync(gatePath, "utf8");
+  const requiredMarkers = [
+    'runtimeEgressGuard.assertAllowed("upstream_base_url")',
+    "capabilityPolicy.evaluateToolExecution(",
+    "modelRegistry.evaluate(",
+    "policyEngine.evaluate(",
+    "approvalService.getOrCreatePending(",
+    "budgetController.evaluateProjected(",
+    "app.get(\"/_clawee/control/security/invariants\"",
+    "app.post(\"/_clawee/control/security/conformance/export\"",
+    "app.post(\"/_clawee/control/security/conformance/verify\"",
+    "__claweeSecurityDecisionId",
+    "invariantCheck({",
+  ];
+  for (const marker of requiredMarkers) {
+    if (!gate.includes(marker)) {
+      failures += 1;
+      console.error(`missing security marker: ${marker}`);
+    }
+  }
+  const guardIndex = gate.indexOf("app.use(guardMiddleware);");
+  const proxyIndex = gate.indexOf("app.use(\"/\", proxy);");
+  if (guardIndex === -1 || proxyIndex === -1) {
+    failures += 1;
+    console.error("missing middleware ordering markers for guard/proxy");
+  } else if (guardIndex > proxyIndex) {
+    failures += 1;
+    console.error("invalid middleware order: proxy registered before guard");
+  }
+}
+
+if (!fs.existsSync(deliveryPath)) {
+  failures += 1;
+  console.error("missing: src/channel-delivery-service.ts");
+} else {
+  const delivery = fs.readFileSync(deliveryPath, "utf8");
+  if (!delivery.includes("destinationPolicy.evaluate(")) {
+    failures += 1;
+    console.error("missing security marker: destinationPolicy.evaluate(");
+  }
+}
+
+if (failures > 0) {
+  console.error(`repo-check: failed (${failures} issues)`);
+  process.exit(1);
+}
+
 console.log("repo-check: ok");

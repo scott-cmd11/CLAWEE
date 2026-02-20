@@ -231,6 +231,69 @@ paths:
                     type: object
                     nullable: true
                     additionalProperties: true
+  /_clawee/control/security/invariants:
+    get:
+      summary: Get runtime security invariants status
+      responses:
+        "200":
+          description: Invariant status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /_clawee/control/security/conformance/export:
+    post:
+      summary: Export signed security conformance snapshot + chain entry
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                report_path:
+                  type: string
+                chain_path:
+                  type: string
+      responses:
+        "200":
+          description: Export result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /_clawee/control/security/conformance/verify:
+    post:
+      summary: Verify signed security conformance report and optional chain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [report_path]
+              properties:
+                report_path:
+                  type: string
+                chain_path:
+                  type: string
+      responses:
+        "200":
+          description: Verification success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "409":
+          description: Verification failure
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
   /_clawee/control/approvals/attestation:
     get:
       summary: Generate approval attestation payload
@@ -437,6 +500,17 @@ paths:
   /_clawee/control/reload/audit-attestation-signing:
     post:
       summary: Reload audit attestation signing keys
+      responses:
+        "200":
+          description: Signing state
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /_clawee/control/reload/security-conformance-signing:
+    post:
+      summary: Reload security conformance signing keys
       responses:
         "200":
           description: Signing state

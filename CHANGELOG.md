@@ -9,6 +9,9 @@
 - Added inbound channel text-size enforcement (`CHANNEL_INGRESS_MAX_TEXT_CHARS`) and explicit `413` responses for oversize payloads.
 - Added signed audit attestation payload/snapshot export + chain verification control endpoints.
 - Added audit-attestation signing key reload endpoint with static key and keyring support.
+- Added runtime security invariant registry and fail-closed invariant enforcement mode.
+- Added signed security conformance export/verify endpoints with sealed chain evidence.
+- Added static anti-bypass checker (`scripts/security-invariants-check.mjs`) integrated into `repo:check`.
 
 ## 0.1.0
 
