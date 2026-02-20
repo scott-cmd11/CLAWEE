@@ -1,0 +1,35 @@
+{
+  "name": "claw-ee",
+  "version": "0.1.0",
+  "description": "Air-gapped enterprise sidecar for OpenClaw with policy gating, provenance, and economic circuit breaking.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "security:tool": "node scripts/security-tools.mjs",
+    "smoke:security": "npm.cmd run build && node tests/security-smoke.mjs && node tests/gate-integration-smoke.mjs && node tests/replay-redis-smoke.mjs",
+    "smoke:redis-replay": "npm.cmd run build && node tests/replay-redis-smoke.mjs",
+    "repo:check": "node scripts/repo-check.mjs",
+    "release:notes": "node scripts/generate-release-notes.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "chokidar": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.3",
+    "openai": "^4.80.0",
+    "redis": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

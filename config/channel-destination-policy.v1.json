@@ -1,0 +1,24 @@
+{
+  "version": "v1",
+  "defaults": {
+    "mode": "allow",
+    "allow_patterns": [],
+    "deny_patterns": [
+      ".*external.*"
+    ]
+  },
+  "channels": {
+    "email": {
+      "mode": "deny",
+      "allow_patterns": [
+        "^[A-Za-z0-9._%+-]+@corp\\.local$"
+      ],
+      "deny_patterns": [
+        "@gmail\\.com$",
+        "@outlook\\.com$",
+        "@yahoo\\.com$"
+      ]
+    }
+  },
+  "signature": ""
+}

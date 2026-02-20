@@ -1,0 +1,33 @@
+{
+  "version": "v1",
+  "high_risk_tools": [
+    "execute_bash",
+    "shell",
+    "terminal",
+    "write_file",
+    "delete_file",
+    "execute_sql",
+    "run_sql",
+    "database_query",
+    "browser_control"
+  ],
+  "critical_patterns": [
+    "drop table",
+    "truncate table",
+    "rm -rf",
+    "delete from",
+    "format c:",
+    "powershell -encodedcommand"
+  ],
+  "high_risk_patterns": [
+    "prod",
+    "production",
+    "secret",
+    "token",
+    "password",
+    "api key",
+    "exfiltrate",
+    "export data"
+  ],
+  "signature": "40b98c35179c1c4736fadb2c964559c1af67133e3dd5a3fd0b8bc799f1eb5bd0"
+}

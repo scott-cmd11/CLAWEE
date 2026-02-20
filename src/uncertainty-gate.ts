@@ -1,0 +1,1930 @@
+import crypto from "node:crypto";
+import http from "node:http";
+import https from "node:https";
+import express, { type Request, type RequestHandler } from "express";
+import {
+  createProxyMiddleware,
+  fixRequestBody,
+  responseInterceptor,
+  type RequestHandler as ProxyRequestHandler,
+} from "http-proxy-middleware";
+import type { AuditLedger } from "./audit-ledger";
+import { ApprovalService } from "./approval-service";
+import { ApprovalAttestationService } from "./approval-attestation";
+import { ApprovalPolicyEngine } from "./approval-policy";
+import { AlertNotifier } from "./alert-notifier";
+import {
+  CapabilityPolicyEngine,
+} from "./capability-policy";
+import { ChannelHub, type ChannelKind } from "./channel-hub";
+import { ChannelDeliveryService } from "./channel-delivery-service";
+import { ChannelDestinationPolicy } from "./channel-destination-policy";
+import { BudgetController, type CostEstimate } from "./budget-controller";
+import type { EnforcementMode, RiskEvaluatorFailMode } from "./config";
+import { type ControlPermission, type ControlIdentity, ControlAuthz } from "./control-authz";
+import type { RiskEvaluator, ToolIntent } from "./inference-provider";
+import { InteractionStore } from "./interaction-store";
+import { ModelRegistry, type ModelModality } from "./model-registry";
+import { ModalityHub, type ModalityType } from "./modality-hub";
+import { PolicyEngine } from "./policy-engine";
+import { FixedWindowRateLimiter } from "./rate-limiter";
+import { ReplayStore } from "./replay-store";
+import { RuntimeEgressGuard, RuntimeEgressPolicyError } from "./runtime-egress-guard";
+import { sha256Hex, stableStringify } from "./utils";
+
+export interface UncertaintyGateOptions {
+  port: number;
+  upstreamBaseUrl: string;
+  warnThreshold: number;
+  evaluatorModel: string;
+  riskEvaluatorFailMode: RiskEvaluatorFailMode;
+  modelRegistryFingerprint: string;
+  enforcementMode: EnforcementMode;
+  controlAuthz: ControlAuthz;
+  channelIngestToken: string;
+  channelIngressHmacSecret: string;
+  channelIngressMaxSkewSeconds: number;
+  channelIngressEventTtlSeconds: number;
+  controlRateLimitWindowSeconds: number;
+  controlRateLimitMaxRequests: number;
+  channelIngressRateLimitWindowSeconds: number;
+  channelIngressRateLimitMaxRequests: number;
+  channelMaxOutboundChars: number;
+  maxRequestInputTokens: number;
+  maxRequestOutputTokens: number;
+  approvalTtlSeconds: number;
+  approvalRequiredCount: number;
+  approvalMaxUses: number;
+  upstreamAgent?: http.Agent | https.Agent;
+}
+
+export interface UncertaintyGateService {
+  close(): Promise<void>;
+}
+
+function parseApprovalMetadata(metadataRaw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(metadataRaw);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+function parseApprovalActors(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function remainingApprovals(record: {
+  required_approvals: number;
+  approval_actors: string;
+}): number {
+  const required = Math.max(1, Math.floor(Number(record.required_approvals || 1)));
+  const current = parseApprovalActors(record.approval_actors).length;
+  return Math.max(0, required - current);
+}
+
+function parseRequiredRoles(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function parseApprovalActorRoles(raw: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const [actor, role] of Object.entries(parsed as Record<string, unknown>)) {
+      const actorKey = String(actor || "").trim();
+      const roleValue = String(role || "").trim().toLowerCase();
+      if (!actorKey || !roleValue) {
+        continue;
+      }
+      out[actorKey] = roleValue;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function missingRequiredRoles(record: {
+  required_roles: string;
+  approval_actor_roles: string;
+}): string[] {
+  const requiredRoles = parseRequiredRoles(record.required_roles);
+  if (requiredRoles.length === 0) {
+    return [];
+  }
+  const actorRoles = new Set(Object.values(parseApprovalActorRoles(record.approval_actor_roles)));
+  return requiredRoles.filter((role) => !actorRoles.has(role));
+}
+
+function extractToolIntent(body: unknown): ToolIntent {
+  if (!body || typeof body !== "object") {
+    return { hasToolIntent: false, toolNames: [] };
+  }
+
+  const record = body as Record<string, unknown>;
+  const names = new Set<string>();
+  let hasToolIntent = false;
+
+  if (Array.isArray(record.tools)) {
+    hasToolIntent = true;
+    for (const tool of record.tools) {
+      if (tool && typeof tool === "object") {
+        const maybeName = (tool as Record<string, unknown>).name;
+        if (typeof maybeName === "string" && maybeName.trim()) {
+          names.add(maybeName.trim());
+        }
+      }
+    }
+  }
+
+  if (typeof record.tool === "string" && record.tool.trim()) {
+    hasToolIntent = true;
+    names.add(record.tool.trim());
+  }
+
+  if (Array.isArray(record.messages)) {
+    for (const message of record.messages) {
+      if (!message || typeof message !== "object") {
+        continue;
+      }
+      const msg = message as Record<string, unknown>;
+      if (Array.isArray(msg.tool_calls)) {
+        hasToolIntent = true;
+      }
+    }
+  }
+
+  return {
+    hasToolIntent,
+    toolNames: [...names],
+  };
+}
+
+function estimateInputTokens(payload: unknown): number {
+  const raw = JSON.stringify(payload);
+  return Math.max(1, Math.ceil(raw.length / 4));
+}
+
+function extractOutputTokens(payload: unknown): number {
+  if (!payload || typeof payload !== "object") {
+    return 512;
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.max_output_tokens === "number" && record.max_output_tokens > 0) {
+    return Math.floor(record.max_output_tokens);
+  }
+  if (typeof record.max_tokens === "number" && record.max_tokens > 0) {
+    return Math.floor(record.max_tokens);
+  }
+  return 512;
+}
+
+function extractModel(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "unknown-model";
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.model === "string" && record.model.trim()) {
+    return record.model.trim();
+  }
+  return "unknown-model";
+}
+
+function inferModality(pathValue: string, payload: unknown): ModelModality {
+  const pathLower = pathValue.toLowerCase();
+  if (pathLower.includes("embeddings")) {
+    return "embedding";
+  }
+  if (
+    pathLower.includes("audio") ||
+    pathLower.includes("speech") ||
+    pathLower.includes("transcribe")
+  ) {
+    return "audio";
+  }
+  if (pathLower.includes("image") || pathLower.includes("vision")) {
+    return "vision";
+  }
+
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    if ("input_audio" in record || "audio" in record) {
+      return "audio";
+    }
+    if ("input_image" in record || "image" in record) {
+      return "vision";
+    }
+  }
+
+  return "text";
+}
+
+function extractChannelHint(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const record = payload as Record<string, unknown>;
+  const directChannel =
+    typeof record.channel === "string" && record.channel.trim()
+      ? record.channel.trim().toLowerCase()
+      : "";
+  if (directChannel) {
+    return directChannel;
+  }
+  const sourceChannel =
+    typeof record.source_channel === "string" && record.source_channel.trim()
+      ? record.source_channel.trim().toLowerCase()
+      : "";
+  if (sourceChannel) {
+    return sourceChannel;
+  }
+  const metadata =
+    record.metadata && typeof record.metadata === "object"
+      ? (record.metadata as Record<string, unknown>)
+      : null;
+  if (metadata) {
+    const metadataChannel =
+      typeof metadata.channel === "string" && metadata.channel.trim()
+        ? metadata.channel.trim().toLowerCase()
+        : "";
+    if (metadataChannel) {
+      return metadataChannel;
+    }
+    const metadataSourceChannel =
+      typeof metadata.source_channel === "string" && metadata.source_channel.trim()
+        ? metadata.source_channel.trim().toLowerCase()
+        : "";
+    if (metadataSourceChannel) {
+      return metadataSourceChannel;
+    }
+  }
+  return "";
+}
+
+function isControlPath(pathValue: string): boolean {
+  return pathValue.startsWith("/_clawee/control");
+}
+
+function isChannelIngressPath(pathValue: string): boolean {
+  return pathValue.startsWith("/_clawee/channel/");
+}
+
+function parseBearerToken(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  if (value.startsWith("Bearer ")) {
+    return value.slice("Bearer ".length).trim();
+  }
+  return value.trim();
+}
+
+function controlTokenFromRequest(req: Request): string {
+  const authHeader = parseBearerToken(req.header("authorization"));
+  if (authHeader) {
+    return authHeader;
+  }
+  return req.header("x-control-token")?.trim() || "";
+}
+
+function channelAuthorized(req: Request, token: string): boolean {
+  const authHeader = parseBearerToken(req.header("authorization"));
+  const tokenHeader = req.header("x-channel-token")?.trim() || "";
+  return authHeader === token || tokenHeader === token;
+}
+
+interface ChannelHmacResult {
+  ok: boolean;
+  reason: string;
+  nonceMaterial?: string;
+}
+
+function verifyChannelHmac(req: Request, secret: string, maxSkewSeconds: number): ChannelHmacResult {
+  const normalizedSecret = secret.trim();
+  if (!normalizedSecret) {
+    return { ok: true, reason: "hmac-disabled" };
+  }
+  const signatureRaw = (req.header("x-channel-signature") || "").trim();
+  if (!signatureRaw) {
+    return { ok: false, reason: "missing-signature" };
+  }
+
+  const providedHex = signatureRaw.replace(/^sha256=/i, "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(providedHex)) {
+    return { ok: false, reason: "invalid-signature-format" };
+  }
+
+  const rawBody = (req as Request & { rawBody?: string }).rawBody || "";
+  const timestamp = (req.header("x-channel-timestamp") || "").trim();
+  if (!timestamp.length) {
+    return { ok: false, reason: "missing-timestamp" };
+  }
+  const payload = `${timestamp}.${rawBody}`;
+
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts)) {
+    return { ok: false, reason: "invalid-timestamp" };
+  }
+  const timestampMs = ts > 1e12 ? ts : ts * 1000;
+  const skewMs = Math.abs(Date.now() - timestampMs);
+  if (skewMs > Math.max(1, maxSkewSeconds) * 1000) {
+    return { ok: false, reason: "timestamp-skew-exceeded" };
+  }
+
+  const expectedHex = crypto.createHmac("sha256", normalizedSecret).update(payload).digest("hex");
+  const provided = Buffer.from(providedHex, "hex");
+  const expected = Buffer.from(expectedHex, "hex");
+  if (provided.length !== expected.length) {
+    return { ok: false, reason: "signature-length-mismatch" };
+  }
+  if (!crypto.timingSafeEqual(provided, expected)) {
+    return { ok: false, reason: "signature-mismatch" };
+  }
+  return {
+    ok: true,
+    reason: "ok",
+    nonceMaterial: `${req.path}|${timestamp}|${providedHex}`,
+  };
+}
+
+function parseChannelKind(raw: string): ChannelKind | null {
+  const value = raw.trim().toLowerCase();
+  if (value === "slack" || value === "teams" || value === "discord" || value === "email" || value === "webhook") {
+    return value;
+  }
+  return null;
+}
+
+function extractIngressEventKey(req: Request): string {
+  const headerEventId =
+    (req.header("x-channel-event-id") || req.header("x-event-id") || "").trim().toLowerCase();
+  const channel = String(req.params.channel || "").trim().toLowerCase();
+  if (headerEventId) {
+    return `${channel}|${headerEventId}`;
+  }
+  if (req.body && typeof req.body === "object") {
+    const record = req.body as Record<string, unknown>;
+    const bodyEventId = String(record.event_id || record.id || "").trim().toLowerCase();
+    if (bodyEventId) {
+      return `${channel}|${bodyEventId}`;
+    }
+  }
+  return "";
+}
+
+function requestFingerprint(req: Request): string {
+  return sha256Hex(`${req.method}|${req.originalUrl}|${stableStringify(req.body)}`);
+}
+
+function approvalHeader(req: Request): string {
+  return (req.header("x-clawee-approval-id") || "").trim();
+}
+
+function parseActualUsage(payload: unknown): { inputTokens: number; outputTokens: number; model: string } | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const usage = (record.usage || {}) as Record<string, unknown>;
+  const inputTokens =
+    typeof usage.input_tokens === "number"
+      ? usage.input_tokens
+      : typeof usage.prompt_tokens === "number"
+        ? usage.prompt_tokens
+        : 0;
+  const outputTokens =
+    typeof usage.output_tokens === "number"
+      ? usage.output_tokens
+      : typeof usage.completion_tokens === "number"
+        ? usage.completion_tokens
+        : 0;
+
+  if (inputTokens <= 0 && outputTokens <= 0) {
+    return null;
+  }
+
+  return {
+    inputTokens: Math.max(0, Math.floor(inputTokens)),
+    outputTokens: Math.max(0, Math.floor(outputTokens)),
+    model: typeof record.model === "string" && record.model ? record.model : "unknown-model",
+  };
+}
+
+export async function startUncertaintyGate(
+  options: UncertaintyGateOptions,
+  ledger: AuditLedger,
+  riskEvaluator: RiskEvaluator,
+  budgetController: BudgetController,
+  modelRegistry: ModelRegistry,
+  runtimeEgressGuard: RuntimeEgressGuard,
+  approvalPolicy: ApprovalPolicyEngine,
+  capabilityPolicy: CapabilityPolicyEngine,
+  policyEngine: PolicyEngine,
+  approvalService: ApprovalService,
+  alertNotifier: AlertNotifier,
+  modalityHub: ModalityHub,
+  channelHub: ChannelHub,
+  interactionStore: InteractionStore,
+  replayStore: ReplayStore,
+  channelDeliveryService: ChannelDeliveryService,
+  channelDestinationPolicy: ChannelDestinationPolicy,
+  approvalAttestationService: ApprovalAttestationService,
+  reloadHandlers?: {
+    reloadPolicyCatalog?: () => { fingerprint: string };
+    reloadModelRegistry?: () => { fingerprint: string };
+    reloadApprovalPolicyCatalog?: () => { fingerprint: string };
+    reloadCapabilityCatalog?: () => { fingerprint: string };
+  },
+): Promise<UncertaintyGateService> {
+  const app = express();
+  const sendAlert = async (
+    event: string,
+    severity: "info" | "warning" | "critical",
+    message: string,
+    details?: Record<string, unknown>,
+  ) => {
+    try {
+      await alertNotifier.send({
+        event,
+        severity,
+        message,
+        details,
+      });
+    } catch (error) {
+      ledger.logAndSignAction("SYSTEM_ERROR", {
+        module: "uncertainty-gate",
+        stage: "alert-notifier",
+        event,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const persistInteraction = (
+    stage: string,
+    fn: () => void,
+    context: Record<string, unknown>,
+  ) => {
+    try {
+      fn();
+    } catch (error) {
+      ledger.logAndSignAction("SYSTEM_ERROR", {
+        module: "uncertainty-gate",
+        stage,
+        context,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  app.use(
+    express.json({
+      limit: "10mb",
+      verify: (req, _res, buf) => {
+        (req as Request & { rawBody?: string }).rawBody = buf.toString("utf8");
+      },
+    }),
+  );
+  app.use(express.urlencoded({ extended: true }));
+  const controlLimiter = new FixedWindowRateLimiter(
+    options.controlRateLimitWindowSeconds,
+    options.controlRateLimitMaxRequests,
+  );
+  const channelLimiter = new FixedWindowRateLimiter(
+    options.channelIngressRateLimitWindowSeconds,
+    options.channelIngressRateLimitMaxRequests,
+  );
+
+  const controlAuth =
+    (permission: ControlPermission): RequestHandler =>
+    (req, res, next) => {
+      const rateKey = `control:${req.ip || "unknown"}`;
+      const rateDecision = controlLimiter.check(rateKey);
+      if (!rateDecision.allowed) {
+        ledger.logAndSignAction("RATE_LIMIT_BLOCKED", {
+          path: req.originalUrl,
+          method: req.method,
+          scope: "control",
+          retry_after_seconds: rateDecision.retryAfterSeconds,
+        });
+        res.setHeader("retry-after", String(rateDecision.retryAfterSeconds));
+        res.status(429).json({ error: "Control rate limit exceeded." });
+        return;
+      }
+      const token = controlTokenFromRequest(req);
+      const identity = options.controlAuthz.authenticate(token);
+      if (!identity) {
+        ledger.logAndSignAction("CONTROL_ACCESS_DENIED", {
+          path: req.originalUrl,
+          method: req.method,
+          permission,
+        });
+        res.status(401).json({ error: "Unauthorized control request." });
+        return;
+      }
+      if (!options.controlAuthz.can(identity, permission)) {
+        ledger.logAndSignAction("CONTROL_SCOPE_DENIED", {
+          path: req.originalUrl,
+          method: req.method,
+          principal: identity.principal,
+          role: identity.role,
+          permission,
+        });
+        res.status(403).json({ error: "Forbidden by control permission policy." });
+        return;
+      }
+      (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity = identity;
+      next();
+    };
+
+  app.get("/_clawee/control/status", controlAuth("system.read"), (_req, res) => {
+    const status = budgetController.getStatus();
+    const controlAuthzState = options.controlAuthz.getState();
+    const connectorState = channelDeliveryService.getConnectorState();
+    const destinationPolicyState = channelDestinationPolicy.getState();
+    const attestationSigning = approvalAttestationService.getSigningState();
+    const capabilityPolicyState = capabilityPolicy.getState();
+    const approvalPolicyState = approvalPolicy.getState();
+    const replayStoreState = replayStore.getState();
+    res.json({
+      enforcement_mode: options.enforcementMode,
+      warn_threshold: options.warnThreshold,
+      risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
+      max_request_input_tokens: options.maxRequestInputTokens,
+      max_request_output_tokens: options.maxRequestOutputTokens,
+      channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
+      channel_max_outbound_chars: options.channelMaxOutboundChars,
+      approval_required_count: options.approvalRequiredCount,
+      approval_max_uses: options.approvalMaxUses,
+      model_registry_fingerprint: options.modelRegistryFingerprint,
+      budget: status,
+      control_authz: controlAuthzState,
+      channel_connectors: connectorState,
+      channel_destination_policy: destinationPolicyState,
+      approval_attestation_signing: attestationSigning,
+      approval_policy: approvalPolicyState,
+      capability_policy: capabilityPolicyState,
+      replay_store: replayStoreState,
+    });
+  });
+
+  app.post("/_clawee/control/resume", controlAuth("budget.control"), (req, res) => {
+    const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+    const resumedBy = identity?.principal || "manual-operator";
+    budgetController.resume(resumedBy);
+    ledger.logAndSignAction("BUDGET_RESUMED", { resumed_by: resumedBy });
+    res.json({ ok: true, status: budgetController.getStatus() });
+  });
+
+  app.post("/_clawee/control/suspend", controlAuth("budget.control"), (req, res) => {
+    const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "Manual suspension request.";
+    budgetController.suspend(reason);
+    ledger.logAndSignAction("BUDGET_SUSPENDED", {
+      reason,
+      source: "manual",
+      principal: identity?.principal || "unknown",
+    });
+    res.json({ ok: true, status: budgetController.getStatus() });
+  });
+
+  app.get("/_clawee/control/approvals/pending", controlAuth("approvals.read"), (_req, res) => {
+    const pending = approvalService.getPending();
+    res.json({
+      count: pending.length,
+      approvals: pending,
+    });
+  });
+
+  app.post("/_clawee/control/approvals/:id/approve", controlAuth("approvals.write"), (req, res) => {
+    try {
+      const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+      const actor = identity?.principal || "manual-operator";
+      const existing = approvalService.getById(req.params.id);
+      if (existing) {
+        const metadata = parseApprovalMetadata(existing.metadata);
+        const requestedBy = typeof metadata.requested_by === "string" ? metadata.requested_by : "";
+        if (requestedBy && requestedBy === actor) {
+          ledger.logAndSignAction("APPROVAL_CONFLICT_OF_INTEREST_DENIED", {
+            approval_id: req.params.id,
+            actor,
+            requested_by: requestedBy,
+          });
+          res.status(409).json({
+            error: "Approver cannot approve their own requested action.",
+          });
+          return;
+        }
+      }
+      const row = approvalService.approve(req.params.id, actor, identity?.role || "unknown");
+      const remaining = remainingApprovals(row);
+      const missingRoles = missingRequiredRoles(row);
+      if (row.status === "approved") {
+        ledger.logAndSignAction("APPROVAL_GRANTED", {
+          approval_id: row.id,
+          actor,
+          required_approvals: row.required_approvals,
+          required_roles: parseRequiredRoles(row.required_roles),
+          approval_actors: parseApprovalActors(row.approval_actors),
+          approval_actor_roles: parseApprovalActorRoles(row.approval_actor_roles),
+        });
+        void sendAlert("approval_granted", "info", "High-risk approval was granted.", {
+          approval_id: row.id,
+          actor,
+          required_approvals: row.required_approvals,
+          required_roles: parseRequiredRoles(row.required_roles),
+          approval_actors: parseApprovalActors(row.approval_actors),
+          approval_actor_roles: parseApprovalActorRoles(row.approval_actor_roles),
+        });
+        res.json({
+          ok: true,
+          approval: row,
+          remaining_approvals: remaining,
+          missing_required_roles: missingRoles,
+        });
+        return;
+      }
+      ledger.logAndSignAction("APPROVAL_REQUIRED", {
+        approval_id: row.id,
+        actor,
+        required_approvals: row.required_approvals,
+        required_roles: parseRequiredRoles(row.required_roles),
+        approval_actors: parseApprovalActors(row.approval_actors),
+        approval_actor_roles: parseApprovalActorRoles(row.approval_actor_roles),
+        remaining_approvals: remaining,
+        missing_required_roles: missingRoles,
+        stage: "partial-approval",
+      });
+      res.status(202).json({
+        ok: false,
+        pending: true,
+        approval: row,
+        remaining_approvals: remaining,
+        missing_required_roles: missingRoles,
+      });
+    } catch (error) {
+      res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/approvals/:id/deny", controlAuth("approvals.write"), (req, res) => {
+    try {
+      const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+      const actor = identity?.principal || "manual-operator";
+      const row = approvalService.deny(req.params.id, actor);
+      ledger.logAndSignAction("APPROVAL_DENIED", {
+        approval_id: row.id,
+        actor,
+      });
+      void sendAlert("approval_denied", "warning", "High-risk approval was denied.", {
+        approval_id: row.id,
+        actor,
+      });
+      res.json({ ok: true, approval: row });
+    } catch (error) {
+      res.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get("/_clawee/control/audit/recent", controlAuth("audit.read"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 100);
+    const limit = Number.isNaN(rawLimit) ? 100 : rawLimit;
+    res.json({
+      count: Math.min(Math.max(1, Math.floor(limit)), 1000),
+      events: ledger.getRecent(limit),
+    });
+  });
+
+  app.get("/_clawee/control/channel/inbound", controlAuth("channel.read"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 100);
+    const limit = Number.isNaN(rawLimit) ? 100 : rawLimit;
+    res.json({
+      events: channelHub.listInbound(limit),
+    });
+  });
+
+  app.get("/_clawee/control/channel/outbound", controlAuth("channel.read"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 100);
+    const limit = Number.isNaN(rawLimit) ? 100 : rawLimit;
+    res.json({
+      messages: channelHub.listOutbound(limit),
+    });
+  });
+
+  app.get("/_clawee/control/channel/delivery", controlAuth("channel.read"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 100);
+    const limit = Number.isNaN(rawLimit) ? 100 : rawLimit;
+    res.json({
+      deliveries: interactionStore.listDeliveries(limit),
+    });
+  });
+
+  app.post("/_clawee/control/channel/delivery/:id/retry", controlAuth("channel.delivery.retry"), (req, res) => {
+    const ok = interactionStore.forceRetry(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: "Delivery message not found." });
+      return;
+    }
+    ledger.logAndSignAction("CHANNEL_DELIVERY_RETRY_FORCED", {
+      message_id: req.params.id,
+    });
+    res.json({ ok: true });
+  });
+
+  app.post("/_clawee/control/channel/reload-connectors", controlAuth("channel.connector.reload"), (_req, res) => {
+    try {
+      channelDeliveryService.reloadConnectors();
+      const state = channelDeliveryService.getConnectorState();
+      ledger.logAndSignAction("CHANNEL_CONNECTOR_CATALOG_RELOADED", state);
+      res.json({ ok: true, ...state });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get("/_clawee/control/metrics", controlAuth("system.read"), (_req, res) => {
+    const uptimeSeconds = Math.floor(process.uptime());
+    const controlAuthzState = options.controlAuthz.getState();
+    const connectorState = channelDeliveryService.getConnectorState();
+    const destinationPolicyState = channelDestinationPolicy.getState();
+    const attestationSigning = approvalAttestationService.getSigningState();
+    const capabilityPolicyState = capabilityPolicy.getState();
+    const approvalPolicyState = approvalPolicy.getState();
+    const replayStoreState = replayStore.getState();
+    res.json({
+      service: "claw-ee",
+      uptime_seconds: uptimeSeconds,
+      timestamp: new Date().toISOString(),
+      risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
+      max_request_input_tokens: options.maxRequestInputTokens,
+      max_request_output_tokens: options.maxRequestOutputTokens,
+      channel_ingress_event_ttl_seconds: options.channelIngressEventTtlSeconds,
+      channel_max_outbound_chars: options.channelMaxOutboundChars,
+      approval_required_count: options.approvalRequiredCount,
+      approval_max_uses: options.approvalMaxUses,
+      budget: budgetController.getStatus(),
+      approvals: approvalService.getStats(),
+      channels: channelHub.stats(),
+      modalities: modalityHub.stats(),
+      interactions: interactionStore.counts(),
+      audit: {
+        total_events: ledger.getCount(),
+      },
+      control_authz: controlAuthzState,
+      channel_connectors: connectorState,
+      channel_destination_policy: destinationPolicyState,
+      approval_attestation_signing: attestationSigning,
+      approval_policy: approvalPolicyState,
+      capability_policy: capabilityPolicyState,
+      replay_store: replayStoreState,
+      process: {
+        pid: process.pid,
+        memory_rss: process.memoryUsage().rss,
+        memory_heap_used: process.memoryUsage().heapUsed,
+      },
+    });
+  });
+
+  app.post("/_clawee/control/reload/policies", controlAuth("policy.reload"), (_req, res) => {
+    if (!reloadHandlers?.reloadPolicyCatalog) {
+      res.status(400).json({ error: "Policy reload handler is not configured." });
+      return;
+    }
+    try {
+      const result = reloadHandlers.reloadPolicyCatalog();
+      ledger.logAndSignAction("POLICY_CATALOG_RELOADED", {
+        fingerprint: result.fingerprint,
+      });
+      res.json({ ok: true, fingerprint: result.fingerprint });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/reload/approval-policy", controlAuth("policy.reload"), (_req, res) => {
+    if (!reloadHandlers?.reloadApprovalPolicyCatalog) {
+      res.status(400).json({ error: "Approval policy reload handler is not configured." });
+      return;
+    }
+    try {
+      const result = reloadHandlers.reloadApprovalPolicyCatalog();
+      ledger.logAndSignAction("APPROVAL_POLICY_RELOADED", {
+        fingerprint: result.fingerprint,
+      });
+      res.json({ ok: true, fingerprint: result.fingerprint });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/reload/capability-policy", controlAuth("policy.reload"), (_req, res) => {
+    if (!reloadHandlers?.reloadCapabilityCatalog) {
+      res.status(400).json({ error: "Capability policy reload handler is not configured." });
+      return;
+    }
+    try {
+      const result = reloadHandlers.reloadCapabilityCatalog();
+      ledger.logAndSignAction("CAPABILITY_CATALOG_RELOADED", {
+        fingerprint: result.fingerprint,
+      });
+      res.json({ ok: true, fingerprint: result.fingerprint });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/reload/model-registry", controlAuth("model.reload"), (_req, res) => {
+    if (!reloadHandlers?.reloadModelRegistry) {
+      res.status(400).json({ error: "Model registry reload handler is not configured." });
+      return;
+    }
+    try {
+      const result = reloadHandlers.reloadModelRegistry();
+      ledger.logAndSignAction("MODEL_REGISTRY_RELOADED", {
+        fingerprint: result.fingerprint,
+      });
+      res.json({ ok: true, fingerprint: result.fingerprint });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/_clawee/control/reload/control-tokens", controlAuth("authz.reload"), (_req, res) => {
+    try {
+      const state = options.controlAuthz.reload();
+      ledger.logAndSignAction("CONTROL_TOKEN_CATALOG_RELOADED", state);
+      res.json({ ok: true, ...state });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post(
+    "/_clawee/control/reload/channel-destination-policy",
+    controlAuth("channel.destination.reload"),
+    (_req, res) => {
+      try {
+        const state = channelDestinationPolicy.reload();
+        ledger.logAndSignAction("CHANNEL_DESTINATION_POLICY_RELOADED", state);
+        res.json({ ok: true, ...state });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  );
+
+  app.get("/_clawee/control/approvals/attestation", controlAuth("approvals.export"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 1000);
+    const limit = Number.isNaN(rawLimit) ? 1000 : rawLimit;
+    const since = typeof req.query.since === "string" ? req.query.since : "";
+    const payload = approvalAttestationService.generate(limit, since);
+    ledger.logAndSignAction("APPROVAL_ATTESTATION_GENERATED", {
+      count: payload.count,
+      final_hash: payload.final_hash,
+      since: payload.since,
+    });
+    res.json(payload);
+  });
+
+  app.post("/_clawee/control/approvals/attestation/export", controlAuth("approvals.export"), (req, res) => {
+    const rawLimit = Number(req.body?.limit || 1000);
+    const limit = Number.isNaN(rawLimit) ? 1000 : rawLimit;
+    const since = typeof req.body?.since === "string" ? req.body.since : "";
+    const snapshotPath = typeof req.body?.snapshot_path === "string" ? req.body.snapshot_path : "";
+    const chainPath = typeof req.body?.chain_path === "string" ? req.body.chain_path : "";
+    const result = approvalAttestationService.exportSealedSnapshot({
+      snapshotPath,
+      chainPath,
+      limit,
+      since,
+    });
+    ledger.logAndSignAction("APPROVAL_ATTESTATION_EXPORTED", result);
+    res.json({ ok: true, ...result });
+  });
+
+  app.post("/_clawee/control/approvals/attestation/verify", controlAuth("approvals.verify"), (req, res) => {
+    const snapshotPath = typeof req.body?.snapshot_path === "string" ? req.body.snapshot_path : "";
+    const chainPath = typeof req.body?.chain_path === "string" ? req.body.chain_path : "";
+    if (!snapshotPath) {
+      res.status(400).json({ error: "snapshot_path is required." });
+      return;
+    }
+    try {
+      const snapshot = approvalAttestationService.verifySnapshotFile(snapshotPath);
+      const chain = chainPath
+        ? approvalAttestationService.verifySealedChain(chainPath, { verifySnapshots: true })
+        : null;
+      const valid = snapshot.valid && (chain ? chain.valid : true);
+      ledger.logAndSignAction("APPROVAL_ATTESTATION_VERIFIED", {
+        snapshot_path: snapshotPath,
+        chain_path: chainPath || null,
+        valid,
+        snapshot_valid: snapshot.valid,
+        chain_valid: chain?.valid ?? null,
+      });
+      res.json({
+        ok: valid,
+        snapshot,
+        chain,
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post(
+    "/_clawee/control/reload/approval-attestation-signing",
+    controlAuth("approvals.verify"),
+    (_req, res) => {
+      try {
+        const state = approvalAttestationService.reloadSigningKeys();
+        ledger.logAndSignAction("APPROVAL_ATTESTATION_SIGNING_RELOADED", state);
+        res.json({ ok: true, ...state });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  );
+
+  app.post("/_clawee/control/channel/send", controlAuth("channel.send"), (req, res) => {
+    const identity = (req as Request & { controlIdentity?: ControlIdentity }).controlIdentity;
+    const channel = parseChannelKind(String(req.body?.channel || ""));
+    const destination = typeof req.body?.destination === "string" ? req.body.destination : "";
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!channel || !destination || !text) {
+      res.status(400).json({ error: "Invalid channel send payload." });
+      return;
+    }
+    if (text.length > Math.max(1, Math.floor(options.channelMaxOutboundChars))) {
+      ledger.logAndSignAction("CHANNEL_MESSAGE_SIZE_BLOCKED", {
+        channel,
+        destination,
+        text_length: text.length,
+        max_allowed_chars: options.channelMaxOutboundChars,
+      });
+      res.status(413).json({
+        error: "Blocked by Claw-EE outbound message size policy.",
+        text_length: text.length,
+        max_allowed_chars: options.channelMaxOutboundChars,
+      });
+      return;
+    }
+    const channelActionDecision = capabilityPolicy.evaluateChannelAction("channel.send", channel);
+    if (!channelActionDecision.allowed) {
+      ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
+        path: req.originalUrl,
+        method: req.method,
+        channel,
+        action: "channel.send",
+        reason: channelActionDecision.reason,
+        matched_signals: channelActionDecision.matchedSignals,
+      });
+      void sendAlert(
+        "capability_blocked_action",
+        "critical",
+        "Claw-EE blocked outbound channel action by capability policy.",
+        {
+          path: req.originalUrl,
+          method: req.method,
+          channel,
+          action: "channel.send",
+          reason: channelActionDecision.reason,
+          matched_signals: channelActionDecision.matchedSignals,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE capability policy.",
+        reason: channelActionDecision.reason,
+        matched_signals: channelActionDecision.matchedSignals,
+      });
+      return;
+    }
+    const destinationDecision = channelDestinationPolicy.evaluate(channel, destination);
+    if (!destinationDecision.allowed) {
+      ledger.logAndSignAction("CHANNEL_DESTINATION_BLOCKED", {
+        stage: "queue",
+        channel,
+        destination,
+        reason: destinationDecision.reason,
+        matched_pattern: destinationDecision.matched_pattern,
+        source: destinationDecision.source,
+      });
+      void sendAlert(
+        "channel_destination_blocked",
+        "warning",
+        "Claw-EE blocked outbound channel destination by destination policy.",
+        {
+          channel,
+          destination,
+          reason: destinationDecision.reason,
+          matched_pattern: destinationDecision.matched_pattern,
+          source: destinationDecision.source,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE channel destination policy.",
+        reason: destinationDecision.reason,
+        matched_pattern: destinationDecision.matched_pattern,
+      });
+      return;
+    }
+    const policyDecision = policyEngine.evaluate({
+      path: req.originalUrl,
+      method: req.method,
+      body: {
+        channel,
+        destination,
+        text,
+        metadata: (req.body?.metadata || {}) as Record<string, unknown>,
+      },
+      model: "control-plane",
+      modality: "text",
+      intent: { hasToolIntent: false, toolNames: [] },
+    });
+    let approvedRequest: { id: string; fingerprint: string } | null = null;
+    if (policyDecision.decision === "block") {
+      ledger.logAndSignAction("POLICY_BLOCKED_ACTION", {
+        path: req.originalUrl,
+        method: req.method,
+        model: "control-plane",
+        modality: "text",
+        reason: policyDecision.reason,
+        matched_signals: policyDecision.matchedSignals,
+      });
+      void sendAlert(
+        "policy_blocked_action",
+        "critical",
+        "Claw-EE blocked outbound channel message by policy.",
+        {
+          path: req.originalUrl,
+          reason: policyDecision.reason,
+          matched_signals: policyDecision.matchedSignals,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE policy engine.",
+        reason: policyDecision.reason,
+        matched_signals: policyDecision.matchedSignals,
+      });
+      return;
+    }
+    if (policyDecision.decision === "require_approval") {
+      const approvalRequirements = approvalPolicy.evaluate({
+        policyDecision,
+        channel,
+        action: "channel.send",
+        toolNames: [],
+      });
+      const fingerprint = requestFingerprint(req);
+      const approvalId = approvalHeader(req);
+      const isApproved =
+        approvalId.length > 0 && approvalService.validateApproved(approvalId, fingerprint);
+      if (!isApproved) {
+        const created = approvalService.getOrCreatePending({
+          requestFingerprint: fingerprint,
+          reason: policyDecision.reason,
+          metadata: {
+            path: req.originalUrl,
+            method: req.method,
+            channel,
+            destination,
+            signals: policyDecision.matchedSignals,
+            requested_by: identity?.principal || "unknown",
+            required_approvals: approvalRequirements.requiredApprovals,
+            required_roles: approvalRequirements.requiredRoles,
+          },
+          ttlSeconds: options.approvalTtlSeconds,
+          requiredApprovals: approvalRequirements.requiredApprovals,
+          requiredRoles: approvalRequirements.requiredRoles,
+          maxUses: options.approvalMaxUses,
+        });
+        if (created.created) {
+          ledger.logAndSignAction("APPROVAL_CREATED", {
+            approval_id: created.record.id,
+            reason: created.record.reason,
+            expires_at: created.record.expires_at,
+          });
+        }
+        ledger.logAndSignAction("APPROVAL_REQUIRED", {
+          approval_id: created.record.id,
+          path: req.originalUrl,
+          method: req.method,
+          reason: policyDecision.reason,
+          signals: policyDecision.matchedSignals,
+          required_approvals: created.record.required_approvals,
+          required_roles: parseRequiredRoles(created.record.required_roles),
+        });
+        void sendAlert(
+          "approval_required",
+          "warning",
+          "Claw-EE requires human approval for outbound channel message.",
+          {
+            approval_id: created.record.id,
+            path: req.originalUrl,
+            reason: policyDecision.reason,
+            required_approvals: created.record.required_approvals,
+            required_roles: parseRequiredRoles(created.record.required_roles),
+          },
+        );
+        res.status(428).json({
+          error: "Approval required by Claw-EE policy engine.",
+          approval_id: created.record.id,
+          expires_at: created.record.expires_at,
+          reason: policyDecision.reason,
+          required_approvals: created.record.required_approvals,
+          required_roles: parseRequiredRoles(created.record.required_roles),
+          max_uses: created.record.max_uses,
+          use_count: created.record.use_count,
+          current_approvals: parseApprovalActors(created.record.approval_actors).length,
+          remaining_approvals: remainingApprovals(created.record),
+          missing_required_roles: missingRequiredRoles(created.record),
+        });
+        return;
+      }
+      approvedRequest = {
+        id: approvalId,
+        fingerprint,
+      };
+    }
+    if (approvedRequest) {
+      const consumed = approvalService.consumeApproved(
+        approvedRequest.id,
+        approvedRequest.fingerprint,
+      );
+      if (!consumed) {
+        ledger.logAndSignAction("APPROVAL_TOKEN_REPLAY_BLOCKED", {
+          approval_id: approvedRequest.id,
+          path: req.originalUrl,
+          method: req.method,
+        });
+        res.status(428).json({
+          error: "Approval token is expired or already consumed.",
+        });
+        return;
+      }
+      ledger.logAndSignAction("APPROVAL_GRANTED", {
+        approval_id: approvedRequest.id,
+        path: req.originalUrl,
+        method: req.method,
+        source: "request-header",
+      });
+    }
+    const queued = channelHub.queueOutbound({
+      channel,
+      destination,
+      text,
+      metadata: (req.body?.metadata || {}) as Record<string, unknown>,
+      timestamp: typeof req.body?.timestamp === "string" ? req.body.timestamp : undefined,
+    });
+    ledger.logAndSignAction("CHANNEL_MESSAGE_QUEUED", {
+      channel,
+      destination,
+      message_id: queued.id,
+    });
+    persistInteraction("interaction-store:channel-outbound", () => {
+      interactionStore.recordChannelOutbound(queued);
+    }, { message_id: queued.id, channel, destination });
+    res.json({ ok: true, message: queued });
+  });
+
+  app.post("/_clawee/control/modality/ingest", controlAuth("modality.write"), (req, res) => {
+    const sessionId = typeof req.body?.session_id === "string" ? req.body.session_id : "";
+    const modality = typeof req.body?.modality === "string" ? req.body.modality : "";
+    const source = typeof req.body?.source === "string" ? req.body.source : "";
+    if (!sessionId || !source || !["text", "vision", "audio", "action"].includes(modality)) {
+      res.status(400).json({
+        error: "Invalid modality observation payload.",
+      });
+      return;
+    }
+    const observation = modalityHub.ingest({
+      session_id: sessionId,
+      modality: modality as ModalityType,
+      source,
+      payload: req.body?.payload ?? {},
+      timestamp: typeof req.body?.timestamp === "string" ? req.body.timestamp : undefined,
+    });
+    ledger.logAndSignAction("MODALITY_OBSERVATION", {
+      observation_id: observation.id,
+      session_id: observation.session_id,
+      modality: observation.modality,
+      source: observation.source,
+    });
+    persistInteraction(
+      "interaction-store:modality-control",
+      () => {
+        interactionStore.recordModality(observation);
+      },
+      { observation_id: observation.id, session_id: observation.session_id },
+    );
+    res.json({ ok: true, observation });
+  });
+
+  const channelIngestAuth: RequestHandler = (req, res, next) => {
+    void (async () => {
+      const rateKey = `channel:${req.ip || "unknown"}:${req.params.channel || "unknown"}`;
+      const rateDecision = channelLimiter.check(rateKey);
+      if (!rateDecision.allowed) {
+        ledger.logAndSignAction("RATE_LIMIT_BLOCKED", {
+          path: req.originalUrl,
+          method: req.method,
+          scope: "channel-ingress",
+          retry_after_seconds: rateDecision.retryAfterSeconds,
+        });
+        res.setHeader("retry-after", String(rateDecision.retryAfterSeconds));
+        res.status(429).json({ error: "Channel ingress rate limit exceeded." });
+        return;
+      }
+      if (!channelAuthorized(req, options.channelIngestToken)) {
+        ledger.logAndSignAction("CONTROL_ACCESS_DENIED", {
+          path: req.originalUrl,
+          method: req.method,
+          channel_ingest: true,
+        });
+        res.status(401).json({ error: "Unauthorized channel ingest request." });
+        return;
+      }
+      const signatureCheck = verifyChannelHmac(
+        req,
+        options.channelIngressHmacSecret,
+        options.channelIngressMaxSkewSeconds,
+      );
+      if (!signatureCheck.ok) {
+        ledger.logAndSignAction("CHANNEL_INGRESS_SIGNATURE_DENIED", {
+          path: req.originalUrl,
+          method: req.method,
+          reason: signatureCheck.reason,
+        });
+        res.status(401).json({ error: "Invalid channel ingress signature." });
+        return;
+      }
+      if (signatureCheck.nonceMaterial) {
+        const nonceHash = sha256Hex(signatureCheck.nonceMaterial);
+        const accepted = await replayStore.registerNonce(
+          nonceHash,
+          options.channelIngressMaxSkewSeconds,
+        );
+        if (!accepted) {
+          ledger.logAndSignAction("CHANNEL_INGRESS_REPLAY_BLOCKED", {
+            path: req.originalUrl,
+            method: req.method,
+          });
+          res.status(409).json({ error: "Replay detected for channel ingress request." });
+          return;
+        }
+      }
+      const eventKey = extractIngressEventKey(req);
+      if (eventKey) {
+        const eventKeyHash = sha256Hex(eventKey);
+        const accepted = await replayStore.registerEventKey(
+          eventKeyHash,
+          options.channelIngressEventTtlSeconds,
+        );
+        if (!accepted) {
+          ledger.logAndSignAction("CHANNEL_INGRESS_EVENT_REPLAY_BLOCKED", {
+            path: req.originalUrl,
+            method: req.method,
+            channel: req.params.channel || "unknown",
+          });
+          res.status(409).json({ error: "Replay detected for channel event id." });
+          return;
+        }
+      }
+      const channel = parseChannelKind(req.params.channel || "");
+      if (channel) {
+        const channelActionDecision = capabilityPolicy.evaluateChannelAction("channel.ingest", channel);
+        if (!channelActionDecision.allowed) {
+          ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
+            path: req.originalUrl,
+            method: req.method,
+            channel,
+            action: "channel.ingest",
+            reason: channelActionDecision.reason,
+            matched_signals: channelActionDecision.matchedSignals,
+          });
+          res.status(403).json({
+            error: "Blocked by Claw-EE capability policy.",
+            reason: channelActionDecision.reason,
+            matched_signals: channelActionDecision.matchedSignals,
+          });
+          return;
+        }
+      }
+      next();
+    })().catch((error) => {
+      ledger.logAndSignAction("SYSTEM_ERROR", {
+        module: "uncertainty-gate",
+        stage: "channel-ingest-auth",
+        path: req.originalUrl,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: "Channel ingest auth failed." });
+    });
+  };
+
+  app.post("/_clawee/channel/:channel/inbound", channelIngestAuth, (req, res) => {
+    const channel = parseChannelKind(req.params.channel || "");
+    const source = typeof req.body?.source === "string" ? req.body.source : "";
+    const sender = typeof req.body?.sender === "string" ? req.body.sender : "";
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!channel || !source || !sender || !text) {
+      res.status(400).json({ error: "Invalid inbound channel payload." });
+      return;
+    }
+    const inbound = channelHub.ingestInbound({
+      channel,
+      source,
+      sender,
+      text,
+      metadata: (req.body?.metadata || {}) as Record<string, unknown>,
+      timestamp: typeof req.body?.timestamp === "string" ? req.body.timestamp : undefined,
+    });
+    const observation = modalityHub.ingest({
+      session_id: typeof req.body?.session_id === "string" ? req.body.session_id : `channel:${channel}:${source}`,
+      modality: "text",
+      source: `${channel}:${source}`,
+      payload: {
+        sender,
+        text,
+        metadata: inbound.metadata,
+      },
+      timestamp: inbound.timestamp,
+    });
+    ledger.logAndSignAction("CHANNEL_EVENT_INGESTED", {
+      channel,
+      source,
+      sender,
+      event_id: inbound.id,
+      observation_id: observation.id,
+    });
+    persistInteraction(
+      "interaction-store:channel-inbound",
+      () => {
+        interactionStore.recordChannelInbound(inbound);
+        interactionStore.recordModality(observation);
+      },
+      { event_id: inbound.id, observation_id: observation.id, channel, source },
+    );
+    res.json({ ok: true, event: inbound, observation });
+  });
+
+  app.get("/_clawee/control/modality/recent", controlAuth("modality.read"), (req, res) => {
+    const rawLimit = Number(req.query.limit || 100);
+    const limit = Number.isNaN(rawLimit) ? 100 : rawLimit;
+    res.json({
+      observations: modalityHub.listRecent(limit),
+    });
+  });
+
+  const guardMiddleware: RequestHandler = async (req, res, next) => {
+    if (isControlPath(req.path) || isChannelIngressPath(req.path) || req.method === "GET" || req.method === "HEAD") {
+      return next();
+    }
+
+    try {
+      await runtimeEgressGuard.assertAllowed("upstream_base_url");
+    } catch (error) {
+      const details =
+        error instanceof RuntimeEgressPolicyError ? error.result : { reason: String(error) };
+      ledger.logAndSignAction("RUNTIME_EGRESS_BLOCKED", {
+        path: req.originalUrl,
+        method: req.method,
+        target: "upstream_base_url",
+        details,
+      });
+      void sendAlert(
+        "runtime_egress_blocked",
+        "critical",
+        "Claw-EE blocked request due to runtime egress policy.",
+        {
+          path: req.originalUrl,
+          method: req.method,
+          details,
+        },
+      );
+      res.status(503).json({
+        error: "Blocked by Claw-EE runtime egress policy.",
+        details,
+      });
+      return;
+    }
+
+    const model = extractModel(req.body);
+    const modality = inferModality(req.originalUrl, req.body);
+    const intent = extractToolIntent(req.body);
+    const channelHint = extractChannelHint(req.body);
+    const capabilityToolDecision = capabilityPolicy.evaluateToolExecution(intent.toolNames, channelHint);
+    if (!capabilityToolDecision.allowed) {
+      ledger.logAndSignAction("CAPABILITY_BLOCKED_ACTION", {
+        path: req.originalUrl,
+        method: req.method,
+        model,
+        modality,
+        tools: intent.toolNames,
+        channel_hint: channelHint || null,
+        reason: capabilityToolDecision.reason,
+        matched_signals: capabilityToolDecision.matchedSignals,
+      });
+      void sendAlert(
+        "capability_blocked_action",
+        "critical",
+        "Claw-EE blocked tool execution by capability policy.",
+        {
+          path: req.originalUrl,
+          method: req.method,
+          model,
+          modality,
+          tools: intent.toolNames,
+          channel_hint: channelHint || null,
+          reason: capabilityToolDecision.reason,
+          matched_signals: capabilityToolDecision.matchedSignals,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE capability policy.",
+        reason: capabilityToolDecision.reason,
+        matched_signals: capabilityToolDecision.matchedSignals,
+      });
+      return;
+    }
+    const inputTokens = estimateInputTokens(req.body);
+    const outputTokens = extractOutputTokens(req.body);
+    if (inputTokens > Math.max(1, Math.floor(options.maxRequestInputTokens))) {
+      ledger.logAndSignAction("TOKEN_BUDGET_BLOCKED", {
+        path: req.originalUrl,
+        method: req.method,
+        token_type: "input",
+        estimated_tokens: inputTokens,
+        max_allowed_tokens: options.maxRequestInputTokens,
+      });
+      res.status(413).json({
+        error: "Blocked by Claw-EE request token policy.",
+        token_type: "input",
+        estimated_tokens: inputTokens,
+        max_allowed_tokens: options.maxRequestInputTokens,
+      });
+      return;
+    }
+    if (outputTokens > Math.max(1, Math.floor(options.maxRequestOutputTokens))) {
+      ledger.logAndSignAction("TOKEN_BUDGET_BLOCKED", {
+        path: req.originalUrl,
+        method: req.method,
+        token_type: "output",
+        estimated_tokens: outputTokens,
+        max_allowed_tokens: options.maxRequestOutputTokens,
+      });
+      res.status(413).json({
+        error: "Blocked by Claw-EE request token policy.",
+        token_type: "output",
+        estimated_tokens: outputTokens,
+        max_allowed_tokens: options.maxRequestOutputTokens,
+      });
+      return;
+    }
+    const modelPolicy = modelRegistry.evaluate(model, modality);
+    if (!modelPolicy.allowed) {
+      ledger.logAndSignAction("MODEL_POLICY_BLOCKED", {
+        path: req.originalUrl,
+        method: req.method,
+        model,
+        modality,
+        reason: modelPolicy.reason,
+      });
+      void sendAlert(
+        "model_policy_blocked",
+        "critical",
+        "Claw-EE blocked request due to model registry policy.",
+        {
+          path: req.originalUrl,
+          model,
+          modality,
+          reason: modelPolicy.reason,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE model registry policy.",
+        reason: modelPolicy.reason,
+      });
+      return;
+    }
+
+    const policyDecision = policyEngine.evaluate({
+      path: req.originalUrl,
+      method: req.method,
+      body: req.body,
+      model,
+      modality,
+      intent,
+    });
+    let approvedRequest: { id: string; fingerprint: string } | null = null;
+    if (policyDecision.decision === "block") {
+      ledger.logAndSignAction("POLICY_BLOCKED_ACTION", {
+        path: req.originalUrl,
+        method: req.method,
+        model,
+        modality,
+        reason: policyDecision.reason,
+        matched_signals: policyDecision.matchedSignals,
+      });
+      void sendAlert(
+        "policy_blocked_action",
+        "critical",
+        "Claw-EE blocked a critical action by policy.",
+        {
+          path: req.originalUrl,
+          method: req.method,
+          reason: policyDecision.reason,
+          matched_signals: policyDecision.matchedSignals,
+        },
+      );
+      res.status(403).json({
+        error: "Blocked by Claw-EE policy engine.",
+        reason: policyDecision.reason,
+        matched_signals: policyDecision.matchedSignals,
+      });
+      return;
+    }
+
+    if (policyDecision.decision === "require_approval") {
+      const approvalRequirements = approvalPolicy.evaluate({
+        policyDecision,
+        channel: channelHint,
+        action: "tool.execute",
+        toolNames: intent.toolNames,
+      });
+      const fingerprint = requestFingerprint(req);
+      const approvalId = approvalHeader(req);
+      const isApproved =
+        approvalId.length > 0 && approvalService.validateApproved(approvalId, fingerprint);
+      if (!isApproved) {
+        const created = approvalService.getOrCreatePending({
+          requestFingerprint: fingerprint,
+          reason: policyDecision.reason,
+          metadata: {
+            path: req.originalUrl,
+            method: req.method,
+            model,
+            modality,
+            signals: policyDecision.matchedSignals,
+            required_approvals: approvalRequirements.requiredApprovals,
+            required_roles: approvalRequirements.requiredRoles,
+          },
+          ttlSeconds: options.approvalTtlSeconds,
+          requiredApprovals: approvalRequirements.requiredApprovals,
+          requiredRoles: approvalRequirements.requiredRoles,
+          maxUses: options.approvalMaxUses,
+        });
+        if (created.created) {
+          ledger.logAndSignAction("APPROVAL_CREATED", {
+            approval_id: created.record.id,
+            reason: created.record.reason,
+            expires_at: created.record.expires_at,
+          });
+        }
+        ledger.logAndSignAction("APPROVAL_REQUIRED", {
+          approval_id: created.record.id,
+          path: req.originalUrl,
+          method: req.method,
+          reason: policyDecision.reason,
+          signals: policyDecision.matchedSignals,
+          required_approvals: created.record.required_approvals,
+          required_roles: parseRequiredRoles(created.record.required_roles),
+        });
+        void sendAlert(
+          "approval_required",
+          "warning",
+          "Claw-EE requires human approval for a high-risk action.",
+          {
+            approval_id: created.record.id,
+            path: req.originalUrl,
+            reason: policyDecision.reason,
+            required_approvals: created.record.required_approvals,
+            required_roles: parseRequiredRoles(created.record.required_roles),
+          },
+        );
+        res.status(428).json({
+          error: "Approval required by Claw-EE policy engine.",
+          approval_id: created.record.id,
+          expires_at: created.record.expires_at,
+          reason: policyDecision.reason,
+          required_approvals: created.record.required_approvals,
+          required_roles: parseRequiredRoles(created.record.required_roles),
+          max_uses: created.record.max_uses,
+          use_count: created.record.use_count,
+          current_approvals: parseApprovalActors(created.record.approval_actors).length,
+          remaining_approvals: remainingApprovals(created.record),
+          missing_required_roles: missingRequiredRoles(created.record),
+        });
+        return;
+      }
+      approvedRequest = {
+        id: approvalId,
+        fingerprint,
+      };
+    }
+
+    let estimate: CostEstimate;
+    try {
+      estimate = budgetController.estimateCost(model, inputTokens, outputTokens);
+    } catch (error) {
+      ledger.logAndSignAction("SYSTEM_ERROR", {
+        module: "uncertainty-gate",
+        stage: "budget-estimate",
+        path: req.originalUrl,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return next();
+    }
+
+    const budgetDecision = budgetController.evaluateProjected(estimate);
+    if (budgetDecision.decision === "suspend") {
+      ledger.logAndSignAction("BUDGET_SUSPENDED", {
+        reason: budgetDecision.reason || "Budget cap exceeded.",
+        path: req.originalUrl,
+        model,
+        estimated_usd: estimate.estimatedUsd,
+      });
+      void sendAlert(
+        "budget_suspended",
+        "critical",
+        "Claw-EE suspended traffic because budget cap was exceeded.",
+        {
+          path: req.originalUrl,
+          model,
+          reason: budgetDecision.reason || "Budget cap exceeded.",
+          estimated_usd: estimate.estimatedUsd,
+        },
+      );
+      res.status(429).json({
+        error: "Claw-EE suspended: compute budget exceeded.",
+        reason: budgetDecision.reason,
+      });
+      return;
+    }
+
+    (req as Request & { __claweeCostEstimate?: CostEstimate }).__claweeCostEstimate = estimate;
+
+    if (!intent.hasToolIntent) {
+      if (approvedRequest) {
+        const consumed = approvalService.consumeApproved(
+          approvedRequest.id,
+          approvedRequest.fingerprint,
+        );
+        if (!consumed) {
+          ledger.logAndSignAction("APPROVAL_TOKEN_REPLAY_BLOCKED", {
+            approval_id: approvedRequest.id,
+            path: req.originalUrl,
+            method: req.method,
+          });
+          res.status(428).json({
+            error: "Approval token is expired or already consumed.",
+          });
+          return;
+        }
+        ledger.logAndSignAction("APPROVAL_GRANTED", {
+          approval_id: approvedRequest.id,
+          path: req.originalUrl,
+          method: req.method,
+          source: "request-header",
+          consumed: true,
+        });
+      }
+      return next();
+    }
+
+    try {
+      const risk = await riskEvaluator.evaluateRisk(
+        options.evaluatorModel,
+        req.originalUrl,
+        req.method,
+        req.body,
+        intent,
+      );
+
+      (req as Request & { __claweeRisk?: unknown }).__claweeRisk = risk;
+      ledger.logAndSignAction("RISK_SCORED", {
+        path: req.originalUrl,
+        method: req.method,
+        risk,
+        tools: intent.toolNames,
+      });
+
+      if (risk.confidence_score < options.warnThreshold) {
+        if (options.enforcementMode === "block") {
+          ledger.logAndSignAction("RISK_BLOCKED_ACTION", {
+            path: req.originalUrl,
+            method: req.method,
+            threshold: options.warnThreshold,
+            risk,
+            mode: options.enforcementMode,
+          });
+          void sendAlert(
+            "risk_blocked_action",
+            "critical",
+            "Claw-EE blocked action due to low confidence risk evaluation.",
+            {
+              path: req.originalUrl,
+              method: req.method,
+              confidence_score: risk.confidence_score,
+              reason: risk.reason,
+            },
+          );
+          res.status(403).json({
+            error: "Blocked by Claw-EE uncertainty gate.",
+            reason: risk.reason,
+            confidence_score: risk.confidence_score,
+          });
+          return;
+        }
+        res.setHeader("x-clawee-risk-warning", "true");
+        ledger.logAndSignAction("RISK_HIGH_WARNING", {
+          path: req.originalUrl,
+          method: req.method,
+          threshold: options.warnThreshold,
+          risk,
+          mode: options.enforcementMode,
+        });
+      }
+
+      if (approvedRequest) {
+        const consumed = approvalService.consumeApproved(
+          approvedRequest.id,
+          approvedRequest.fingerprint,
+        );
+        if (!consumed) {
+          ledger.logAndSignAction("APPROVAL_TOKEN_REPLAY_BLOCKED", {
+            approval_id: approvedRequest.id,
+            path: req.originalUrl,
+            method: req.method,
+          });
+          res.status(428).json({
+            error: "Approval token is expired or already consumed.",
+          });
+          return;
+        }
+        ledger.logAndSignAction("APPROVAL_GRANTED", {
+          approval_id: approvedRequest.id,
+          path: req.originalUrl,
+          method: req.method,
+          source: "request-header",
+          consumed: true,
+        });
+      }
+
+      next();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ledger.logAndSignAction("SYSTEM_ERROR", {
+        module: "uncertainty-gate",
+        stage: "evaluate",
+        path: req.originalUrl,
+        message,
+        risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
+      });
+      if (options.riskEvaluatorFailMode === "block") {
+        void sendAlert(
+          "risk_evaluator_error",
+          "critical",
+          "Claw-EE blocked action because risk evaluator failed.",
+          {
+            path: req.originalUrl,
+            method: req.method,
+            message,
+          },
+        );
+        res.status(503).json({
+          error: "Blocked by Claw-EE risk evaluator failure policy.",
+          reason: "Risk evaluator unavailable or failed.",
+        });
+        return;
+      }
+      ledger.logAndSignAction("RISK_HIGH_WARNING", {
+        path: req.originalUrl,
+        method: req.method,
+        warning: "risk-evaluator-failed-open",
+        message,
+      });
+      next();
+    }
+  };
+
+  app.use(guardMiddleware);
+
+  const proxy = createProxyMiddleware({
+    target: options.upstreamBaseUrl,
+    changeOrigin: true,
+    ws: true,
+    selfHandleResponse: true,
+    agent: options.upstreamAgent,
+    on: {
+      proxyReq: (proxyReq, req) => {
+        fixRequestBody(proxyReq, req);
+      },
+      proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
+        try {
+          const reqWithState = req as Request & {
+            __claweeCostEstimate?: CostEstimate;
+            __claweeRisk?: unknown;
+          };
+          const estimate = reqWithState.__claweeCostEstimate || null;
+          const contentType = String(proxyRes.headers["content-type"] || "");
+
+          let actual = estimate;
+          if (contentType.includes("application/json")) {
+            const payload = JSON.parse(responseBuffer.toString("utf8")) as unknown;
+            const usage = parseActualUsage(payload);
+            if (usage) {
+              actual = budgetController.estimateCost(usage.model, usage.inputTokens, usage.outputTokens);
+            }
+          }
+
+          if (actual) {
+            budgetController.recordActual({
+              ...actual,
+              requestPath: req.url || "/",
+            });
+            ledger.logAndSignAction("BUDGET_COST_RECORDED", {
+              path: req.url || "/",
+              model: actual.model,
+              input_tokens: actual.inputTokens,
+              output_tokens: actual.outputTokens,
+              usd_cost: actual.estimatedUsd,
+            });
+          }
+        } catch (error) {
+          ledger.logAndSignAction("SYSTEM_ERROR", {
+            module: "uncertainty-gate",
+            stage: "proxy-res",
+            path: req.url,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        const statusCode = proxyRes.statusCode ?? 0;
+        ledger.logAndSignAction("ACTION_FORWARDED", {
+          path: req.url,
+          method: req.method,
+          status_code: statusCode,
+          risk: (req as Request & { __claweeRisk?: unknown }).__claweeRisk ?? null,
+        });
+
+        return responseBuffer;
+      }),
+      error: (error, req) => {
+        ledger.logAndSignAction("SYSTEM_ERROR", {
+          module: "uncertainty-gate",
+          stage: "proxy",
+          path: req.url,
+          message: error.message,
+        });
+      },
+    },
+  }) as ProxyRequestHandler;
+
+  app.use("/", proxy);
+
+  const server = await new Promise<http.Server>((resolve) => {
+    const started = app.listen(options.port, () => resolve(started));
+  });
+
+  return {
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      }),
+  };
+}

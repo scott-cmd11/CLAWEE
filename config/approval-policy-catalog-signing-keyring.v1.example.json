@@ -1,0 +1,8 @@
+{
+  "version": "v1",
+  "active_kid": "approvals-2026-q1",
+  "keys": {
+    "approvals-2025-q4": "replace-with-old-approval-policy-signing-secret",
+    "approvals-2026-q1": "replace-with-active-approval-policy-signing-secret"
+  }
+}

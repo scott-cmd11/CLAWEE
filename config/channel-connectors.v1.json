@@ -1,0 +1,27 @@
+{
+  "version": "v1",
+  "default_timeout_ms": 10000,
+  "channels": {
+    "slack": {
+      "webhook_url": "http://localhost:9001/channel/slack",
+      "hmac_secret": ""
+    },
+    "teams": {
+      "webhook_url": "http://localhost:9001/channel/teams",
+      "hmac_secret": ""
+    },
+    "discord": {
+      "webhook_url": "http://localhost:9001/channel/discord",
+      "hmac_secret": ""
+    },
+    "email": {
+      "webhook_url": "http://localhost:9001/channel/email",
+      "hmac_secret": ""
+    },
+    "webhook": {
+      "webhook_url": "http://localhost:9001/channel/webhook",
+      "hmac_secret": ""
+    }
+  },
+  "signature": ""
+}

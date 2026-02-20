@@ -1,0 +1,15 @@
+services:
+  claw-ee:
+    build: .
+    container_name: claw-ee
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro
+      - claw_ee_openclaw_home:/root/.openclaw
+
+volumes:
+  claw_ee_openclaw_home:

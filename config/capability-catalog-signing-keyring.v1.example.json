@@ -1,0 +1,8 @@
+{
+  "version": "v1",
+  "active_kid": "cap-2026-q1",
+  "keys": {
+    "cap-2025-q4": "replace-with-old-capability-catalog-signing-secret",
+    "cap-2026-q1": "replace-with-active-capability-catalog-signing-secret"
+  }
+}

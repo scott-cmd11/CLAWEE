@@ -1,0 +1,48 @@
+{
+  "version": "v1",
+  "tokens": [
+    {
+      "principal": "security-observer",
+      "role": "observer",
+      "token_hash": "REPLACE_WITH_SHA256_HEX_OF_TOKEN",
+      "permissions": [
+        "system.read",
+        "audit.read",
+        "channel.read",
+        "modality.read",
+        "approvals.read"
+      ],
+      "active": true
+    },
+    {
+      "principal": "incident-operator",
+      "role": "operator",
+      "token_hash": "REPLACE_WITH_SHA256_HEX_OF_TOKEN",
+      "permissions": [
+        "system.read",
+        "budget.control",
+        "approvals.read",
+        "approvals.write",
+        "channel.read",
+        "channel.send",
+        "channel.delivery.retry",
+        "channel.connector.reload",
+        "channel.destination.reload",
+        "modality.read",
+        "modality.write",
+        "audit.read",
+        "approvals.export",
+        "approvals.verify",
+        "policy.reload",
+        "model.reload",
+        "authz.reload"
+      ],
+      "active": true
+    }
+  ],
+  "signature": "",
+  "signature_v2": {
+    "kid": "",
+    "sig": ""
+  }
+}

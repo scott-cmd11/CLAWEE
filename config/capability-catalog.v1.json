@@ -1,0 +1,30 @@
+{
+  "version": "v1",
+  "defaults": {
+    "mode": "allow",
+    "allow_tools": [],
+    "deny_tools": [
+      "database_query",
+      "delete_file",
+      "execute_bash",
+      "execute_sql",
+      "run_sql"
+    ],
+    "allow_actions": [],
+    "deny_actions": []
+  },
+  "channels": {
+    "email": {
+      "mode": "deny",
+      "allow_tools": [],
+      "deny_tools": [],
+      "allow_actions": [
+        "channel.ingest"
+      ],
+      "deny_actions": [
+        "channel.send"
+      ]
+    }
+  },
+  "signature": "5981710ea936abadc69fb74b11ef5c8fe7168ffadfecbb14346a942416917807"
+}

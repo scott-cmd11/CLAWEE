@@ -1,0 +1,44 @@
+{
+  "version": "v1",
+  "defaults": {
+    "required_approvals": 2,
+    "required_roles": [
+      "approver"
+    ]
+  },
+  "risk_class_overrides": {
+    "critical": {
+      "required_approvals": 3,
+      "required_roles": [
+        "approver",
+        "superadmin"
+      ]
+    }
+  },
+  "tool_overrides": {
+    "execute_sql": {
+      "required_approvals": 3,
+      "required_roles": [
+        "approver",
+        "superadmin"
+      ]
+    },
+    "execute_bash": {
+      "required_approvals": 3,
+      "required_roles": [
+        "approver",
+        "superadmin"
+      ]
+    }
+  },
+  "channel_action_overrides": {
+    "email:channel.send": {
+      "required_approvals": 3,
+      "required_roles": [
+        "approver",
+        "superadmin"
+      ]
+    }
+  },
+  "signature": "b313a8f70c5ee909d91dd71bdf0cfef5fded5797a1b5f73b9865ac0ad6efe9cb"
+}

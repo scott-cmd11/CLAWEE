@@ -1,0 +1,20 @@
+{
+  "version": "v1",
+  "models": [
+    {
+      "model": "gpt-4.1-mini",
+      "input_usd_per_1k": 0.0004,
+      "output_usd_per_1k": 0.0016
+    },
+    {
+      "model": "unknown-model",
+      "input_usd_per_1k": 0.0005,
+      "output_usd_per_1k": 0.002
+    },
+    {
+      "model": "*",
+      "input_usd_per_1k": 0.0005,
+      "output_usd_per_1k": 0.002
+    }
+  ]
+}

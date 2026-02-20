@@ -1,0 +1,8 @@
+{
+  "version": "v1",
+  "active_kid": "k2026-01",
+  "keys": {
+    "k2026-01": "REPLACE_WITH_CURRENT_SECRET",
+    "k2025-12": "REPLACE_WITH_PREVIOUS_SECRET"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "id": "pipeline-health-check",
+      "enabled": true,
+      "interval_seconds": 300,
+      "description": "Check ingestion pipeline heartbeat and lag."
+    },
+    {
+      "id": "inbox-triage",
+      "enabled": false,
+      "interval_seconds": 600,
+      "description": "Summarize unread incident emails."
+    }
+  ]
+}

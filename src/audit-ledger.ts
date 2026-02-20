@@ -1,0 +1,192 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import Database from "better-sqlite3";
+import { redactSensitive, stableStringify } from "./utils";
+
+export type AuditActionType =
+  | "ACTION_FORWARDED"
+  | "RISK_SCORED"
+  | "RISK_HIGH_WARNING"
+  | "RISK_BLOCKED_ACTION"
+  | "BUDGET_COST_RECORDED"
+  | "TOKEN_BUDGET_BLOCKED"
+  | "BUDGET_SUSPENDED"
+  | "BUDGET_RESUMED"
+  | "CONTROL_ACCESS_DENIED"
+  | "CONTROL_SCOPE_DENIED"
+  | "RATE_LIMIT_BLOCKED"
+  | "POLICY_BLOCKED_ACTION"
+  | "APPROVAL_REQUIRED"
+  | "APPROVAL_CREATED"
+  | "APPROVAL_GRANTED"
+  | "APPROVAL_DENIED"
+  | "APPROVAL_CONFLICT_OF_INTEREST_DENIED"
+  | "APPROVAL_TOKEN_REPLAY_BLOCKED"
+  | "APPROVAL_ATTESTATION_GENERATED"
+  | "APPROVAL_ATTESTATION_EXPORTED"
+  | "APPROVAL_ATTESTATION_PERIODIC_EXPORTED"
+  | "APPROVAL_ATTESTATION_VERIFIED"
+  | "APPROVAL_ATTESTATION_SIGNING_RELOADED"
+  | "APPROVAL_ATTESTATION_SNAPSHOTS_PRUNED"
+  | "APPROVAL_POLICY_LOADED"
+  | "APPROVAL_POLICY_RELOADED"
+  | "HEARTBEAT_TICK"
+  | "HEARTBEAT_TASK_DUE"
+  | "MODALITY_OBSERVATION"
+  | "CHANNEL_EVENT_INGESTED"
+  | "CHANNEL_MESSAGE_QUEUED"
+  | "CHANNEL_MESSAGE_SIZE_BLOCKED"
+  | "CHANNEL_INGRESS_SIGNATURE_DENIED"
+  | "CHANNEL_INGRESS_REPLAY_BLOCKED"
+  | "CHANNEL_INGRESS_EVENT_REPLAY_BLOCKED"
+  | "CHANNEL_DELIVERY_SENT"
+  | "CHANNEL_DELIVERY_FAILED"
+  | "CHANNEL_DELIVERY_RETRY_FORCED"
+  | "CHANNEL_DESTINATION_POLICY_LOADED"
+  | "CHANNEL_DESTINATION_POLICY_RELOADED"
+  | "CHANNEL_DESTINATION_BLOCKED"
+  | "CHANNEL_CONNECTOR_CATALOG_LOADED"
+  | "CHANNEL_CONNECTOR_CATALOG_RELOADED"
+  | "CAPABILITY_CATALOG_LOADED"
+  | "CAPABILITY_CATALOG_RELOADED"
+  | "CAPABILITY_BLOCKED_ACTION"
+  | "TRANSPORT_SECURITY_READY"
+  | "TRANSPORT_SECURITY_VIOLATION"
+  | "POLICY_CATALOG_LOADED"
+  | "POLICY_CATALOG_RELOADED"
+  | "MODEL_REGISTRY_RELOADED"
+  | "CONTROL_TOKEN_CATALOG_LOADED"
+  | "CONTROL_TOKEN_CATALOG_RELOADED"
+  | "AIRGAP_ATTESTED"
+  | "AIRGAP_POLICY_VIOLATION"
+  | "MODEL_REGISTRY_LOADED"
+  | "REPLAY_STORE_READY"
+  | "MODEL_POLICY_BLOCKED"
+  | "RUNTIME_EGRESS_BLOCKED"
+  | "AFFECTIVE_OVERRIDE_SET"
+  | "AFFECTIVE_OVERRIDE_CLEARED"
+  | "SYSTEM_ERROR";
+
+export interface AuditRow {
+  id: number;
+  timestamp: string;
+  action_type: AuditActionType;
+  payload: string;
+  previous_hash: string;
+  current_hash: string;
+}
+
+export interface AuditLedger {
+  init(): void;
+  logAndSignAction(actionType: AuditActionType, payload: unknown): AuditRow;
+  getRecent(limit?: number): AuditRow[];
+  getCount(): number;
+  close(): void;
+}
+
+const GENESIS_HASH = "0".repeat(64);
+
+export class SqliteAuditLedger implements AuditLedger {
+  private dbPath: string;
+  private db: Database.Database | null = null;
+
+  constructor(dbPath = path.join(os.homedir(), ".openclaw", "enterprise_audit.db")) {
+    this.dbPath = dbPath;
+  }
+
+  init(): void {
+    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    this.db = new Database(this.dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        previous_hash TEXT NOT NULL,
+        current_hash TEXT NOT NULL
+      );
+    `);
+  }
+
+  logAndSignAction(actionType: AuditActionType, payload: unknown): AuditRow {
+    const db = this.assertDb();
+    const timestamp = new Date().toISOString();
+    const serializedPayload = stableStringify(redactSensitive(payload));
+    const previousHash =
+      (db.prepare("SELECT current_hash FROM audit_logs ORDER BY id DESC LIMIT 1").get() as
+        | { current_hash: string }
+        | undefined)?.current_hash ?? GENESIS_HASH;
+
+    const currentHash = crypto
+      .createHash("sha256")
+      .update(`${timestamp}|${actionType}|${serializedPayload}|${previousHash}`)
+      .digest("hex");
+
+    const result = db
+      .prepare(
+        `
+          INSERT INTO audit_logs (timestamp, action_type, payload, previous_hash, current_hash)
+          VALUES (?, ?, ?, ?, ?)
+        `,
+      )
+      .run(timestamp, actionType, serializedPayload, previousHash, currentHash);
+
+    const inserted = db
+      .prepare(
+        `
+          SELECT id, timestamp, action_type, payload, previous_hash, current_hash
+          FROM audit_logs
+          WHERE id = ?
+        `,
+      )
+      .get(Number(result.lastInsertRowid)) as AuditRow;
+
+    return inserted;
+  }
+
+  getRecent(limit = 100): AuditRow[] {
+    const db = this.assertDb();
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 1000);
+    return db
+      .prepare(
+        `
+          SELECT id, timestamp, action_type, payload, previous_hash, current_hash
+          FROM audit_logs
+          ORDER BY id DESC
+          LIMIT ?
+        `,
+      )
+      .all(safeLimit) as AuditRow[];
+  }
+
+  getCount(): number {
+    const db = this.assertDb();
+    const row = db
+      .prepare(
+        `
+          SELECT COUNT(*) AS count
+          FROM audit_logs
+        `,
+      )
+      .get() as { count: number };
+    return Number(row.count || 0);
+  }
+
+  close(): void {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
+
+  private assertDb(): Database.Database {
+    if (!this.db) {
+      throw new Error("Audit ledger is not initialized.");
+    }
+    return this.db;
+  }
+}

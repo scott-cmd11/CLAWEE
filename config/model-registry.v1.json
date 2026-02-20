@@ -1,0 +1,33 @@
+{
+  "version": "v1",
+  "entries": [
+    {
+      "model_id": "gpt-4.1-mini",
+      "modality": "text",
+      "artifact_digest": "sha256:internal-gpt-4.1-mini",
+      "approved": true,
+      "signature": "8cbf7eb6a7b42ae8926b3ed7c338afbf6dc36c2dbbfd0b7404242d233961e41e"
+    },
+    {
+      "model_id": "gpt-4.1-mini",
+      "modality": "safety",
+      "artifact_digest": "sha256:internal-gpt-4.1-mini",
+      "approved": true,
+      "signature": "f036e9c4db5300adc1b2bacd225bd6c6b7301b5531f48f3918ebe3586ba23eb4"
+    },
+    {
+      "model_id": "text-embedding-3-small",
+      "modality": "embedding",
+      "artifact_digest": "sha256:internal-embedding-3-small",
+      "approved": true,
+      "signature": "e39438187750c1cfe78727e2d284fdb005ec5dd1249e81cafb82fdb6027c8489"
+    },
+    {
+      "model_id": "*",
+      "modality": "text",
+      "artifact_digest": "sha256:wildcard-text",
+      "approved": false,
+      "signature": "28b3dff1f9f6383fe6ccfeea0eba2faeea542f9a48801bd00ef297f2be899175"
+    }
+  ]
+}

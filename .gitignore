@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+.openclaw-test/
+*.db
+approval_attestation*.json
+approval_attestation*.jsonl
