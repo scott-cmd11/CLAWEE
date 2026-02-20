@@ -8,8 +8,9 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "security:tool": "node scripts/security-tools.mjs",
-    "smoke:security": "npm.cmd run build && node tests/security-smoke.mjs && node tests/gate-integration-smoke.mjs && node tests/replay-redis-smoke.mjs",
+    "smoke:security": "npm.cmd run build && node tests/security-smoke.mjs && node tests/gate-integration-smoke.mjs && node tests/replay-redis-smoke.mjs && node tests/replay-postgres-smoke.mjs",
     "smoke:redis-replay": "npm.cmd run build && node tests/replay-redis-smoke.mjs",
+    "smoke:postgres-replay": "npm.cmd run build && node tests/replay-postgres-smoke.mjs",
     "security:invariants": "node scripts/security-invariants-check.mjs",
     "repo:check": "node scripts/repo-check.mjs",
     "release:notes": "node scripts/generate-release-notes.mjs"
@@ -24,12 +25,14 @@
     "express": "^4.21.2",
     "http-proxy-middleware": "^3.0.3",
     "openai": "^4.80.0",
+    "pg": "^8.18.0",
     "redis": "^4.7.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.16.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

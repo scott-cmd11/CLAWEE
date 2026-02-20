@@ -23,6 +23,11 @@ async function main() {
       mode: "redis",
       redisUrl,
       redisPrefix: `clawee-smoke-${Date.now()}`,
+      postgresUrl: "",
+      postgresSchema: "clawee",
+      postgresTablePrefix: "replay_",
+      postgresConnectTimeoutMs: 10000,
+      postgresSslMode: "disable",
     },
     interactionStore,
   );

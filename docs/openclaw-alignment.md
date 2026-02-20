@@ -34,7 +34,7 @@ Reference architecture source:
 - Signed policy catalog and signed model registry.
 - Channel ingress HMAC verification (timestamp-bound) and outbound connector signature support.
 - Channel ingress replay defense (nonce + stable event-id tracking) and scoped RBAC for control-plane endpoints.
-  - `REPLAY_STORE_MODE=redis` supports cluster-shared replay dedupe.
+  - `REPLAY_STORE_MODE=redis|postgres` supports cluster-shared replay dedupe.
 - Signed channel connector catalogs to prevent webhook target tampering.
 - Endpoint abuse controls via fixed-window rate limiting on control and channel ingress routes.
 - Optional signed control-token catalog for RBAC integrity and hot reload.
@@ -49,5 +49,4 @@ Reference architecture source:
 ## Remaining roadmap (not fully solved in current MVP)
 
 - Formal machine-checked proofs for every critical action path (current implementation is runtime/static enforcement, not theorem-proved).
-- Postgres replay backend for horizontally scaled multi-node deployments (Redis mode is implemented).
 - Deep causal failure diagnosis loop for long-running autonomous plans.

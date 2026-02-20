@@ -930,6 +930,10 @@ components:
     ControlStatus:
       type: object
       properties:
+        node_id:
+          type: string
+        cluster_id:
+          type: string
         enforcement_mode:
           type: string
         warn_threshold:
@@ -949,9 +953,17 @@ components:
         replay_store:
           type: object
           additionalProperties: true
+        config_fingerprints:
+          type: object
+          additionalProperties:
+            type: string
     ControlMetrics:
       type: object
       properties:
+        node_id:
+          type: string
+        cluster_id:
+          type: string
         service:
           type: string
         timestamp:
@@ -971,3 +983,7 @@ components:
         process:
           type: object
           additionalProperties: true
+        config_fingerprints:
+          type: object
+          additionalProperties:
+            type: string

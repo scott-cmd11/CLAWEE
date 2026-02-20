@@ -329,7 +329,7 @@ async function main() {
   };
   const alertNotifier = new AlertNotifier({ webhookUrl: "", minIntervalMs: 1000 });
   const destinationPolicy = new ChannelDestinationPolicy(destinationPolicyPath, "");
-  destinationPolicy.reload();
+  const destinationPolicyState = destinationPolicy.reload();
   const channelDelivery = new ChannelDeliveryService(
     {
       pollSeconds: 1,
@@ -369,6 +369,16 @@ async function main() {
         riskEvaluatorFailMode: "block",
         auditStartupVerifyMode: "block",
         securityInvariantsEnforcement: "block",
+        nodeId: "smoke-node-1",
+        clusterId: "smoke-cluster-1",
+        configFingerprints: {
+          policy_catalog: policyCatalog.fingerprint,
+          model_registry: modelRegistry.getFingerprint(),
+          capability_catalog: capabilityPolicy.getState().fingerprint,
+          approval_policy: approvalPolicy.getState().fingerprint,
+          channel_destination_policy: destinationPolicyState.fingerprint,
+          channel_connector_catalog: channelDelivery.getConnectorState().fingerprint,
+        },
         modelRegistryFingerprint: modelRegistry.getFingerprint(),
         enforcementMode: "block",
         controlAuthz,

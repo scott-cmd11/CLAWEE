@@ -217,11 +217,24 @@ async function main(): Promise<void> {
       mode: config.replayStoreMode,
       redisUrl: config.replayRedisUrl,
       redisPrefix: config.replayRedisPrefix,
+      postgresUrl: config.replayPostgresUrl,
+      postgresSchema: config.replayPostgresSchema,
+      postgresTablePrefix: config.replayPostgresTablePrefix,
+      postgresConnectTimeoutMs: config.replayPostgresConnectTimeoutMs,
+      postgresSslMode: config.replayPostgresSslMode,
     },
     interactionStore,
   );
   await replayStore.warmup();
   ledger.logAndSignAction("REPLAY_STORE_READY", replayStore.getState());
+  if (config.clusterId !== "local" && config.replayStoreMode === "sqlite") {
+    ledger.logAndSignAction("CLUSTER_CONFIG_WARNING", {
+      node_id: config.nodeId,
+      cluster_id: config.clusterId,
+      reason: "sqlite replay mode is node-local and does not provide cross-node dedupe",
+      recommendation: "use REPLAY_STORE_MODE=redis or postgres",
+    });
+  }
   const alertNotifier = new AlertNotifier({
     webhookUrl: config.alertWebhookUrl,
     minIntervalMs: config.alertMinIntervalMs,
@@ -240,29 +253,6 @@ async function main(): Promise<void> {
     evaluator_model: config.evaluatorModel,
   });
   const invariantRegistry = new SecurityInvariantRegistry();
-  const codeFingerprint = sha256Hex(
-    stableStringify({
-      policy_fingerprint: policyCatalog.fingerprint,
-      approval_policy: approvalPolicy.getState(),
-      capability_policy: capabilityPolicy.getState(),
-      model_registry_fingerprint: modelRegistry.getFingerprint(),
-      replay_store_mode: config.replayStoreMode,
-      security_invariants_enforcement: config.securityInvariantsEnforcement,
-    }),
-  );
-  const securityConformanceService = new SecurityConformanceService({
-    defaultExportPath: config.securityConformanceExportPath,
-    codeFingerprint,
-    runtimeContext: {
-      enforcement_mode: config.enforcementMode,
-      risk_evaluator_fail_mode: config.riskEvaluatorFailMode,
-      security_invariants_enforcement: config.securityInvariantsEnforcement,
-      model_registry_fingerprint: modelRegistry.getFingerprint(),
-      replay_store_mode: config.replayStoreMode,
-    },
-    signingKey: config.securityConformanceSigningKey,
-    signingKeyringPath: config.securityConformanceSigningKeyringPath,
-  });
 
   let transportAgents;
   try {
@@ -358,6 +348,40 @@ async function main(): Promise<void> {
     path: config.channelConnectorConfigPath,
     ...channelDelivery.getConnectorState(),
   });
+  const configFingerprints: Record<string, string> = {
+    policy_catalog: policyCatalog.fingerprint,
+    model_registry: modelRegistry.getFingerprint(),
+    capability_catalog: capabilityPolicy.getState().fingerprint,
+    approval_policy: approvalPolicy.getState().fingerprint,
+    channel_destination_policy: destinationPolicyState.fingerprint,
+    channel_connector_catalog: channelDelivery.getConnectorState().fingerprint,
+  };
+  const codeFingerprint = sha256Hex(
+    stableStringify({
+      ...configFingerprints,
+      replay_store_mode: config.replayStoreMode,
+      security_invariants_enforcement: config.securityInvariantsEnforcement,
+      node_id: config.nodeId,
+      cluster_id: config.clusterId,
+    }),
+  );
+  const securityConformanceService = new SecurityConformanceService({
+    defaultExportPath: config.securityConformanceExportPath,
+    codeFingerprint,
+    runtimeContext: {
+      node_id: config.nodeId,
+      cluster_id: config.clusterId,
+      enforcement_mode: config.enforcementMode,
+      risk_evaluator_fail_mode: config.riskEvaluatorFailMode,
+      security_invariants_enforcement: config.securityInvariantsEnforcement,
+      model_registry_fingerprint: modelRegistry.getFingerprint(),
+      replay_store_mode: config.replayStoreMode,
+      replay_store_state: replayStore.getState(),
+      config_fingerprints: configFingerprints,
+    },
+    signingKey: config.securityConformanceSigningKey,
+    signingKeyringPath: config.securityConformanceSigningKeyringPath,
+  });
 
   const gate = await startUncertaintyGate(
     {
@@ -368,6 +392,9 @@ async function main(): Promise<void> {
       riskEvaluatorFailMode: config.riskEvaluatorFailMode,
       auditStartupVerifyMode: config.auditStartupVerifyMode,
       securityInvariantsEnforcement: config.securityInvariantsEnforcement,
+      nodeId: config.nodeId,
+      clusterId: config.clusterId,
+      configFingerprints,
       modelRegistryFingerprint: modelRegistry.getFingerprint(),
       enforcementMode: config.enforcementMode,
       controlAuthz,

@@ -12,6 +12,10 @@
 - Added runtime security invariant registry and fail-closed invariant enforcement mode.
 - Added signed security conformance export/verify endpoints with sealed chain evidence.
 - Added static anti-bypass checker (`scripts/security-invariants-check.mjs`) integrated into `repo:check`.
+- Added Postgres replay-store backend (`REPLAY_STORE_MODE=postgres`) with schema/table bootstrap and TTL cleanup.
+- Added cluster identity metadata (`CLAWEE_NODE_ID`, `CLAWEE_CLUSTER_ID`) to status/metrics/conformance artifacts.
+- Added config-fingerprint telemetry to detect cross-node policy/config drift in multi-node deployments.
+- Added Postgres replay smoke test and wired it into `smoke:security`.
 
 ## 0.1.0
 

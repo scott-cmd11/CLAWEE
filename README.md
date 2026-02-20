@@ -36,8 +36,11 @@ Optional:
 - `CHANNEL_INGRESS_MAX_TEXT_CHARS` (hard cap for inbound channel `text` length)
 - `CONTROL_RATE_LIMIT_WINDOW_SECONDS` / `CONTROL_RATE_LIMIT_MAX_REQUESTS`
 - `CHANNEL_INGRESS_RATE_LIMIT_WINDOW_SECONDS` / `CHANNEL_INGRESS_RATE_LIMIT_MAX_REQUESTS`
-- `REPLAY_STORE_MODE` (`sqlite` default, `redis` for cluster-shared replay defense)
+- `REPLAY_STORE_MODE` (`sqlite` default; `redis` or `postgres` for cluster-shared replay defense)
 - `REPLAY_REDIS_URL` / `REPLAY_REDIS_PREFIX` (required when `REPLAY_STORE_MODE=redis`)
+- `REPLAY_POSTGRES_URL` / `REPLAY_POSTGRES_SCHEMA` / `REPLAY_POSTGRES_TABLE_PREFIX` (required when `REPLAY_STORE_MODE=postgres`)
+- `REPLAY_POSTGRES_CONNECT_TIMEOUT_MS` / `REPLAY_POSTGRES_SSL_MODE` (`disable|require|verify-full`)
+- `CLAWEE_NODE_ID` / `CLAWEE_CLUSTER_ID` (cluster metadata emitted in status/metrics/conformance evidence)
 - `AUDIT_STARTUP_VERIFY_MODE` (`block` default; `warn` or `off` for relaxed startup integrity handling)
 - `SECURITY_INVARIANTS_ENFORCEMENT` (`block` default; fail-closed invariant coverage enforcement)
 - `MODALITY_TEXT_MAX_PAYLOAD_BYTES` / `MODALITY_VISION_MAX_PAYLOAD_BYTES`
@@ -101,10 +104,10 @@ docker compose up --build -d
 docker compose logs -f claw-ee
 ```
 
-If using Redis replay mode:
+If using Redis or Postgres replay mode:
 
 ```powershell
-npm.cmd install redis
+npm.cmd install redis pg
 ```
 
 Security tooling:
@@ -218,8 +221,9 @@ Channel ingress endpoint (for corporate connectors):
 - Self-approval is blocked when requester identity is known (separation-of-duties).
 - Channel ingress signatures are replay-protected; duplicate signed payloads within skew window are rejected with `409`.
 - Channel ingress event IDs are replay-protected; duplicate `x-channel-event-id` / `event_id` values are rejected with `409`.
-- For multi-node deployments, use `REPLAY_STORE_MODE=redis` so replay dedupe is shared across nodes.
-- Redis replay mode is validated at startup (ping) and fails fast on bad config/connectivity.
+- For multi-node deployments, use `REPLAY_STORE_MODE=redis` or `REPLAY_STORE_MODE=postgres` so replay dedupe is shared across nodes.
+- Redis/Postgres replay mode is validated at startup and fails fast on bad config/connectivity.
+- Status/metrics include `node_id`, `cluster_id`, and signed config fingerprints for cross-node drift detection.
 - Control and channel ingress endpoints are rate-limited and return `429` with `retry-after`.
 - Status/metrics include active control-authz catalog state and connector catalog fingerprint/signing state.
 - Status/metrics include attestation signing mode and active key id when keyring signing is used.

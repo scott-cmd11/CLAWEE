@@ -7,7 +7,7 @@ dotenv.config();
 export type EnforcementMode = "warn" | "block";
 export type OutboundInternetPolicy = "deny" | "allow";
 export type RiskEvaluatorFailMode = "allow" | "block";
-export type ReplayStoreMode = "sqlite" | "redis";
+export type ReplayStoreMode = "sqlite" | "redis" | "postgres";
 export type AuditStartupVerifyMode = "off" | "warn" | "block";
 export type SecurityInvariantsEnforcement = "warn" | "block";
 
@@ -35,6 +35,11 @@ export interface AppConfig {
   replayStoreMode: ReplayStoreMode;
   replayRedisUrl: string;
   replayRedisPrefix: string;
+  replayPostgresUrl: string;
+  replayPostgresSchema: string;
+  replayPostgresTablePrefix: string;
+  replayPostgresConnectTimeoutMs: number;
+  replayPostgresSslMode: "disable" | "require" | "verify-full";
   auditStartupVerifyMode: AuditStartupVerifyMode;
   modalityTextMaxPayloadBytes: number;
   modalityVisionMaxPayloadBytes: number;
@@ -107,6 +112,8 @@ export interface AppConfig {
   auditAttestationDefaultPath: string;
   auditAttestationSigningKey: string;
   auditAttestationSigningKeyringPath: string;
+  nodeId: string;
+  clusterId: string;
   openclawHome: string;
   soulFilePath: string;
   agentsRootPath: string;
@@ -244,9 +251,22 @@ export function loadConfig(): AppConfig {
     controlRateLimitMaxRequests: numberEnv("CONTROL_RATE_LIMIT_MAX_REQUESTS", 300),
     channelIngressRateLimitWindowSeconds: numberEnv("CHANNEL_INGRESS_RATE_LIMIT_WINDOW_SECONDS", 60),
     channelIngressRateLimitMaxRequests: numberEnv("CHANNEL_INGRESS_RATE_LIMIT_MAX_REQUESTS", 300),
-    replayStoreMode: enumEnv<ReplayStoreMode>("REPLAY_STORE_MODE", "sqlite", ["sqlite", "redis"]),
+    replayStoreMode: enumEnv<ReplayStoreMode>("REPLAY_STORE_MODE", "sqlite", [
+      "sqlite",
+      "redis",
+      "postgres",
+    ]),
     replayRedisUrl: process.env.REPLAY_REDIS_URL?.trim() || "",
     replayRedisPrefix: process.env.REPLAY_REDIS_PREFIX?.trim() || "clawee",
+    replayPostgresUrl: process.env.REPLAY_POSTGRES_URL?.trim() || "",
+    replayPostgresSchema: process.env.REPLAY_POSTGRES_SCHEMA?.trim() || "clawee",
+    replayPostgresTablePrefix: process.env.REPLAY_POSTGRES_TABLE_PREFIX?.trim() || "replay_",
+    replayPostgresConnectTimeoutMs: numberEnv("REPLAY_POSTGRES_CONNECT_TIMEOUT_MS", 10000),
+    replayPostgresSslMode: enumEnv<"disable" | "require" | "verify-full">(
+      "REPLAY_POSTGRES_SSL_MODE",
+      "disable",
+      ["disable", "require", "verify-full"],
+    ),
     auditStartupVerifyMode: enumEnv<AuditStartupVerifyMode>(
       "AUDIT_STARTUP_VERIFY_MODE",
       "block",
@@ -348,6 +368,8 @@ export function loadConfig(): AppConfig {
     auditAttestationSigningKey: process.env.AUDIT_ATTESTATION_SIGNING_KEY?.trim() || "",
     auditAttestationSigningKeyringPath:
       process.env.AUDIT_ATTESTATION_SIGNING_KEYRING_PATH?.trim() || "",
+    nodeId: process.env.CLAWEE_NODE_ID?.trim() || os.hostname(),
+    clusterId: process.env.CLAWEE_CLUSTER_ID?.trim() || "local",
     openclawHome,
     soulFilePath,
     agentsRootPath,

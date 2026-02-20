@@ -49,6 +49,9 @@ export interface UncertaintyGateOptions {
   riskEvaluatorFailMode: RiskEvaluatorFailMode;
   auditStartupVerifyMode: AuditStartupVerifyMode;
   securityInvariantsEnforcement: SecurityInvariantsEnforcement;
+  nodeId: string;
+  clusterId: string;
+  configFingerprints: Record<string, string>;
   modelRegistryFingerprint: string;
   enforcementMode: EnforcementMode;
   controlAuthz: ControlAuthz;
@@ -656,6 +659,8 @@ export async function startUncertaintyGate(
     const replayStoreState = replayStore.getState();
     res.json({
       enforcement_mode: options.enforcementMode,
+      node_id: options.nodeId,
+      cluster_id: options.clusterId,
       warn_threshold: options.warnThreshold,
       risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
       audit_startup_verify_mode: options.auditStartupVerifyMode,
@@ -675,6 +680,7 @@ export async function startUncertaintyGate(
       approval_required_count: options.approvalRequiredCount,
       approval_max_uses: options.approvalMaxUses,
       model_registry_fingerprint: options.modelRegistryFingerprint,
+      config_fingerprints: options.configFingerprints,
       budget: status,
       control_authz: controlAuthzState,
       channel_connectors: connectorState,
@@ -1015,6 +1021,8 @@ export async function startUncertaintyGate(
     const replayStoreState = replayStore.getState();
     res.json({
       service: "claw-ee",
+      node_id: options.nodeId,
+      cluster_id: options.clusterId,
       uptime_seconds: uptimeSeconds,
       timestamp: new Date().toISOString(),
       risk_evaluator_fail_mode: options.riskEvaluatorFailMode,
@@ -1034,6 +1042,7 @@ export async function startUncertaintyGate(
       },
       approval_required_count: options.approvalRequiredCount,
       approval_max_uses: options.approvalMaxUses,
+      config_fingerprints: options.configFingerprints,
       budget: budgetController.getStatus(),
       approvals: approvalService.getStats(),
       channels: channelHub.stats(),
