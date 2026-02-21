@@ -12,6 +12,8 @@ import { ControlAuthz } from "../dist/control-authz.js";
 import { ApprovalService } from "../dist/approval-service.js";
 import { ApprovalAttestationService } from "../dist/approval-attestation.js";
 import { ApprovalAttestationJobService } from "../dist/approval-attestation-job.js";
+import { AuditAttestationService } from "../dist/audit-attestation.js";
+import { AuditAttestationJobService } from "../dist/audit-attestation-job.js";
 import {
   ApprovalPolicyEngine,
   loadSignedApprovalPolicyCatalog,
@@ -26,6 +28,9 @@ import { loadSignedPolicyCatalog } from "../dist/policy-catalog.js";
 import { PolicyEngine } from "../dist/policy-engine.js";
 import { FixedWindowRateLimiter } from "../dist/rate-limiter.js";
 import { RuntimeEgressGuard } from "../dist/runtime-egress-guard.js";
+import { SecurityConformanceJobService } from "../dist/security-conformance-job.js";
+import { SecurityConformanceService } from "../dist/security-conformance.js";
+import { SecurityInvariantRegistry } from "../dist/security-invariants.js";
 import { buildTransportAgents } from "../dist/transport-security.js";
 import { stableStringify } from "../dist/utils.js";
 
@@ -726,6 +731,156 @@ async function main() {
   const first = chainLines[0];
   const second = chainLines[1];
   assert.equal(second.previous_snapshot_hash, first.current_snapshot_hash);
+  const auditAttestationKeyringPath = path.join(
+    os.tmpdir(),
+    `claw-ee-audit-attestation-keyring-${Date.now()}.json`,
+  );
+  fs.writeFileSync(
+    auditAttestationKeyringPath,
+    JSON.stringify(
+      {
+        version: "v1",
+        active_kid: "aa2",
+        keys: {
+          aa1: "old-audit-attestation-secret",
+          aa2: "new-audit-attestation-secret",
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  const auditAttestationExportPath = path.join(
+    os.tmpdir(),
+    `claw-ee-audit-attestation-${Date.now()}.json`,
+  );
+  const auditAttestationService = new AuditAttestationService(
+    tempLedger,
+    auditAttestationExportPath,
+    "",
+    auditAttestationKeyringPath,
+  );
+  const auditAttestationPayload = auditAttestationService.generate(500);
+  assert.equal(auditAttestationPayload.signature_kid, "aa2");
+  const auditAttestationVerify = auditAttestationService.verifyPayload(auditAttestationPayload);
+  assert.equal(auditAttestationVerify.valid, true);
+  const auditJobSnapshotDir = path.join(os.tmpdir(), `claw-ee-audit-job-snap-${Date.now()}`);
+  const auditJobChainPath = path.join(os.tmpdir(), `claw-ee-audit-job-chain-${Date.now()}.jsonl`);
+  const auditJob = new AuditAttestationJobService(
+    {
+      enabled: true,
+      intervalSeconds: 600,
+      snapshotDirectory: auditJobSnapshotDir,
+      chainPath: auditJobChainPath,
+      maxRecordsPerExport: 500,
+      incremental: true,
+      retentionMaxFiles: 1,
+    },
+    auditAttestationService,
+    tempLedger,
+  );
+  await auditJob.runNow();
+  await auditJob.runNow();
+  const auditSnapshots = fs.readdirSync(auditJobSnapshotDir);
+  assert.equal(auditSnapshots.length <= 1, true);
+  const auditChainLines = fs
+    .readFileSync(auditJobChainPath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(auditChainLines.length >= 2, true);
+  assert.equal(
+    auditChainLines[1].previous_snapshot_hash,
+    auditChainLines[0].current_snapshot_hash,
+  );
+
+  const conformanceKeyringPath = path.join(
+    os.tmpdir(),
+    `claw-ee-conformance-keyring-${Date.now()}.json`,
+  );
+  fs.writeFileSync(
+    conformanceKeyringPath,
+    JSON.stringify(
+      {
+        version: "v1",
+        active_kid: "sc2",
+        keys: {
+          sc1: "old-conformance-secret",
+          sc2: "new-conformance-secret",
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  const invariantRegistry = new SecurityInvariantRegistry();
+  invariantRegistry.check({ id: "INV-001-RUNTIME-EGRESS-GATE", passed: true });
+  invariantRegistry.check({ id: "INV-002-CAPABILITY-GATE", passed: true });
+  const conformanceService = new SecurityConformanceService({
+    defaultExportPath: path.join(os.tmpdir(), `claw-ee-security-conformance-${Date.now()}.json`),
+    codeFingerprint: "smoke-code-fingerprint",
+    runtimeContext: {
+      environment: "smoke",
+      node_id: "smoke-node",
+    },
+    signingKey: "",
+    signingKeyringPath: conformanceKeyringPath,
+  });
+  const conformancePayload = conformanceService.generate({
+    invariantCatalogHash: invariantRegistry.definitionHash(),
+    summary: invariantRegistry.summary(),
+    invariants: invariantRegistry.list(),
+  });
+  assert.equal(conformancePayload.signature_kid, "sc2");
+  const conformanceReportPath = path.join(os.tmpdir(), `claw-ee-conformance-report-${Date.now()}.json`);
+  const conformanceChainPath = path.join(os.tmpdir(), `claw-ee-conformance-chain-${Date.now()}.jsonl`);
+  const conformanceExport = conformanceService.exportSealedSnapshot(conformancePayload, {
+    reportPath: conformanceReportPath,
+    chainPath: conformanceChainPath,
+  });
+  assert.equal(fs.existsSync(conformanceExport.report_path), true);
+  assert.equal(fs.existsSync(conformanceExport.chain_path), true);
+  const conformanceVerify = conformanceService.verifySnapshotFile(conformanceReportPath);
+  assert.equal(conformanceVerify.valid, true);
+  const conformanceChainVerify = conformanceService.verifySealedChain(conformanceChainPath, {
+    verifySnapshots: true,
+  });
+  assert.equal(conformanceChainVerify.valid, true);
+  const conformanceJobSnapshotDir = path.join(
+    os.tmpdir(),
+    `claw-ee-conformance-job-snap-${Date.now()}`,
+  );
+  const conformanceJobChainPath = path.join(
+    os.tmpdir(),
+    `claw-ee-conformance-job-chain-${Date.now()}.jsonl`,
+  );
+  const conformanceJob = new SecurityConformanceJobService(
+    {
+      enabled: true,
+      intervalSeconds: 600,
+      snapshotDirectory: conformanceJobSnapshotDir,
+      chainPath: conformanceJobChainPath,
+      retentionMaxFiles: 1,
+    },
+    conformanceService,
+    invariantRegistry,
+    tempLedger,
+  );
+  await conformanceJob.runNow();
+  await conformanceJob.runNow();
+  const conformanceSnapshots = fs.readdirSync(conformanceJobSnapshotDir);
+  assert.equal(conformanceSnapshots.length <= 1, true);
+  const conformanceJobChainLines = fs
+    .readFileSync(conformanceJobChainPath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(conformanceJobChainLines.length >= 2, true);
+  assert.equal(conformanceJobChainLines[1].previous_hash, conformanceJobChainLines[0].current_hash);
   const auditIntegrity = tempLedger.verifyIntegrity();
   assert.equal(auditIntegrity.valid, true);
   tempLedger.close();
@@ -759,6 +914,15 @@ async function main() {
   fs.rmSync(tempApprovalsDbPath, { force: true });
   fs.rmSync(tempApprovalExportPath, { force: true });
   fs.rmSync(attestationKeyringPath, { force: true });
+  fs.rmSync(auditAttestationKeyringPath, { force: true });
+  fs.rmSync(auditAttestationExportPath, { force: true });
+  fs.rmSync(auditJobSnapshotDir, { recursive: true, force: true });
+  fs.rmSync(auditJobChainPath, { force: true });
+  fs.rmSync(conformanceKeyringPath, { force: true });
+  fs.rmSync(conformanceReportPath, { force: true });
+  fs.rmSync(conformanceChainPath, { force: true });
+  fs.rmSync(conformanceJobSnapshotDir, { recursive: true, force: true });
+  fs.rmSync(conformanceJobChainPath, { force: true });
   fs.rmSync(tempAuditDbPath, { force: true });
   fs.rmSync(tempSnapshotDir, { recursive: true, force: true });
   fs.rmSync(tempChainPath, { force: true });

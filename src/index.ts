@@ -2,6 +2,7 @@ import path from "node:path";
 import { ApprovalService } from "./approval-service";
 import { ApprovalAttestationService } from "./approval-attestation";
 import { ApprovalAttestationJobService } from "./approval-attestation-job";
+import { AuditAttestationJobService } from "./audit-attestation-job";
 import { AuditAttestationService } from "./audit-attestation";
 import {
   ApprovalPolicyEngine,
@@ -33,6 +34,7 @@ import { PolicyEngine } from "./policy-engine";
 import { createReplayStore } from "./replay-store";
 import { RuntimeEgressGuard } from "./runtime-egress-guard";
 import { SecurityConformanceService } from "./security-conformance";
+import { SecurityConformanceJobService } from "./security-conformance-job";
 import { SecurityInvariantRegistry } from "./security-invariants";
 import { buildTransportAgents } from "./transport-security";
 import { startUncertaintyGate } from "./uncertainty-gate";
@@ -145,6 +147,19 @@ async function main(): Promise<void> {
       retentionMaxFiles: config.approvalAttestationRetentionMaxFiles,
     },
     approvalAttestationService,
+    ledger,
+  );
+  const auditAttestationJob = new AuditAttestationJobService(
+    {
+      enabled: config.auditAttestationPeriodicEnabled,
+      intervalSeconds: config.auditAttestationPeriodicIntervalSeconds,
+      snapshotDirectory: config.auditAttestationSnapshotDirectory,
+      chainPath: config.auditAttestationChainPath,
+      maxRecordsPerExport: config.auditAttestationMaxRecordsPerExport,
+      incremental: config.auditAttestationIncremental,
+      retentionMaxFiles: config.auditAttestationRetentionMaxFiles,
+    },
+    auditAttestationService,
     ledger,
   );
 
@@ -408,6 +423,18 @@ async function main(): Promise<void> {
     signingKey: config.securityConformanceSigningKey,
     signingKeyringPath: config.securityConformanceSigningKeyringPath,
   });
+  const securityConformanceJob = new SecurityConformanceJobService(
+    {
+      enabled: config.securityConformancePeriodicEnabled,
+      intervalSeconds: config.securityConformancePeriodicIntervalSeconds,
+      snapshotDirectory: config.securityConformanceSnapshotDirectory,
+      chainPath: config.securityConformanceChainPath,
+      retentionMaxFiles: config.securityConformanceRetentionMaxFiles,
+    },
+    securityConformanceService,
+    invariantRegistry,
+    ledger,
+  );
   ledger.logAndSignAction("INITIATIVE_ENGINE_READY", {
     enabled: config.initiativeEngineEnabled,
     poll_seconds: config.initiativePollSeconds,
@@ -512,6 +539,8 @@ async function main(): Promise<void> {
   await affective.start();
   await heartbeat.start();
   approvalAttestationJob.start();
+  auditAttestationJob.start();
+  securityConformanceJob.start();
   printBanner(config.port, config.upstreamBaseUrl);
 
   let shuttingDown = false;
@@ -530,6 +559,8 @@ async function main(): Promise<void> {
         await initiativeEngine.stop();
       }
       approvalAttestationJob.stop();
+      auditAttestationJob.stop();
+      securityConformanceJob.stop();
       await gate.close();
       await replayStore.close();
       channelDelivery.stop();

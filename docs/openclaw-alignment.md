@@ -46,6 +46,7 @@ Reference architecture source:
 - Signed per-channel destination policy with queue-time and delivery-time enforcement.
 - Approval attestation export (hash chain + optional signature) for governance evidence.
 - Periodic approval attestation snapshot job with append-only seal chain.
+- Periodic audit-attestation and security-conformance export jobs with append-only seal chains.
 - Verification tooling/API for snapshot and chain integrity checks.
 - Signing key rotation via keyrings (`kid`/multi-key trust) for control tokens and attestation signatures.
 - Hot-reload endpoint for attestation signing keyring rotation without process restart.

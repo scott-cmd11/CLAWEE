@@ -25,6 +25,8 @@ import { ChannelDeliveryService } from "../dist/channel-delivery-service.js";
 import { ChannelDestinationPolicy } from "../dist/channel-destination-policy.js";
 import { ChannelHub } from "../dist/channel-hub.js";
 import { ControlAuthz } from "../dist/control-authz.js";
+import { InitiativeEngine } from "../dist/initiative-engine.js";
+import { InitiativeStore } from "../dist/initiative-store.js";
 import { InteractionStore } from "../dist/interaction-store.js";
 import { ModelRegistry } from "../dist/model-registry.js";
 import { ModalityHub } from "../dist/modality-hub.js";
@@ -120,6 +122,7 @@ async function main() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "claw-ee-smoke-"));
   const controlToken = "control-secret";
   const readonlyToken = "readonly-secret";
+  const initiativeReaderToken = "initiative-reader-secret";
   const approverToken = "approver-secret";
   const approverTokenTwo = "approver-two-secret";
   const ingestToken = "ingest-secret";
@@ -206,6 +209,12 @@ async function main() {
             role: "observer",
             token_hash: crypto.createHash("sha256").update(readonlyToken).digest("hex"),
             permissions: ["system.read"],
+          },
+          {
+            principal: "smoke-initiative-reader",
+            role: "observer",
+            token_hash: crypto.createHash("sha256").update(initiativeReaderToken).digest("hex"),
+            permissions: ["initiative.read"],
           },
           {
             principal: "smoke-approver",
@@ -297,6 +306,20 @@ async function main() {
   const channelHub = new ChannelHub(100);
   const interactionStore = new InteractionStore(path.join(tmpDir, "interactions.db"));
   interactionStore.init();
+  const initiativeStore = new InitiativeStore(path.join(tmpDir, "initiatives.db"));
+  initiativeStore.init();
+  const initiativeEngine = new InitiativeEngine(
+    {
+      enabled: true,
+      pollSeconds: 60,
+      maxTaskRetries: 2,
+      nodeId: "smoke-node-1",
+    },
+    initiativeStore,
+    channelHub,
+    interactionStore,
+    ledger,
+  );
   const replayNonceSeen = new Map();
   const replayEventSeen = new Map();
   const replayStore = {
@@ -437,6 +460,7 @@ async function main() {
           return { fingerprint: reloaded.fingerprint };
         },
       },
+      initiativeEngine,
     );
 
     const ingressBody = JSON.stringify({
@@ -835,6 +859,112 @@ async function main() {
       },
     );
     assert.equal(approvalPolicyReloadAllowed.status, 200);
+    const initiativeListDeniedReadonly = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives`,
+      {
+        headers: {
+          authorization: `Bearer ${readonlyToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeListDeniedReadonly.status, 403);
+    const initiativeListDeniedApprover = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives`,
+      {
+        headers: {
+          authorization: `Bearer ${approverToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeListDeniedApprover.status, 403);
+    const initiativeListReader = await fetch(`http://127.0.0.1:${gatePort}/_clawee/control/initiatives`, {
+      headers: {
+        authorization: `Bearer ${initiativeReaderToken}`,
+      },
+    });
+    assert.equal(initiativeListReader.status, 200);
+    const initiativeCreateDenied = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${initiativeReaderToken}`,
+        },
+        body: JSON.stringify({
+          source: "smoke",
+          title: "Denied write",
+          tasks: [{ task_type: "noop" }],
+        }),
+      },
+    );
+    assert.equal(initiativeCreateDenied.status, 403);
+    const initiativeCreateAllowed = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${controlToken}`,
+        },
+        body: JSON.stringify({
+          source: "smoke",
+          external_ref: "SMOKE-INIT-1",
+          title: "Smoke initiative",
+          tasks: [{ task_type: "noop" }],
+        }),
+      },
+    );
+    assert.equal(initiativeCreateAllowed.status, 201);
+    const initiativeCreateJson = await initiativeCreateAllowed.json();
+    assert.equal(initiativeCreateJson.ok, true);
+    assert.equal(initiativeCreateJson.created, true);
+    const initiativeId = initiativeCreateJson.initiative.id;
+    assert.ok(typeof initiativeId === "string" && initiativeId.length > 0);
+    const initiativeTasksReader = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives/${initiativeId}/tasks`,
+      {
+        headers: {
+          authorization: `Bearer ${initiativeReaderToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeTasksReader.status, 200);
+    const initiativeTasksJson = await initiativeTasksReader.json();
+    assert.equal(Array.isArray(initiativeTasksJson.tasks), true);
+    assert.equal(initiativeTasksJson.tasks.length, 1);
+    const initiativeStartDenied = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives/${initiativeId}/start`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${initiativeReaderToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeStartDenied.status, 403);
+    const initiativeStartAllowed = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives/${initiativeId}/start`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${controlToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeStartAllowed.status, 200);
+    const initiativeEventsReader = await fetch(
+      `http://127.0.0.1:${gatePort}/_clawee/control/initiatives/${initiativeId}/events?limit=50`,
+      {
+        headers: {
+          authorization: `Bearer ${initiativeReaderToken}`,
+        },
+      },
+    );
+    assert.equal(initiativeEventsReader.status, 200);
+    const initiativeEventsJson = await initiativeEventsReader.json();
+    assert.equal(Array.isArray(initiativeEventsJson.events), true);
+    assert.equal(initiativeEventsJson.events.length >= 1, true);
 
     await waitFor(() => delivered.length > 0, 7000);
     assert.equal(delivered[0].path, "/channel/slack");
@@ -1101,6 +1231,8 @@ async function main() {
       await gate.close();
     }
     channelDelivery.stop();
+    await initiativeEngine.stop();
+    initiativeStore.close();
     interactionStore.close();
     approvalService.close();
     budgetController.close();

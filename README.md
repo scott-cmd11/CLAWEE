@@ -195,6 +195,8 @@ Use `.env.example` as the full source of truth. High-impact groups:
 - `APPROVAL_POLICY_CATALOG_PATH`
 - `APPROVAL_ATTESTATION_*`, `AUDIT_ATTESTATION_*`
 - `SECURITY_CONFORMANCE_*`
+- `AUDIT_ATTESTATION_PERIODIC_*` for scheduled immutable audit snapshot export
+- `SECURITY_CONFORMANCE_PERIODIC_*` for scheduled immutable conformance export
 
 ### Signed policy surfaces
 
@@ -217,6 +219,8 @@ Use `.env.example` as the full source of truth. High-impact groups:
 - Rate-limited routes return `429` with `retry-after`.
 
 ## Security Tooling
+
+Key rotation runbook: `docs/security-key-rotation.md`
 
 Useful commands:
 

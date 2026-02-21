@@ -6,6 +6,11 @@
 - Added initiative control endpoints for create/list/state transitions and task/event inspection (`/_clawee/control/initiatives*`).
 - Added initiative telemetry to control status/metrics and conformance context.
 - Added initiative smoke test and wired it into `smoke:security`.
+- Added periodic immutable export jobs for audit attestation and security conformance with chain sealing and retention controls.
+- Added initiative RBAC boundary coverage in gate integration smoke tests (`initiative.read` vs `initiative.write`).
+- Added keyring coverage tests for audit attestation and security conformance signatures.
+- Added repo-check workflow assertions to enforce strict replay smoke in CI/release workflows.
+- Added key-rotation runbook for signed catalogs and attestation/conformance signing surfaces.
 - Added startup audit hash-chain verification with configurable fail mode (`AUDIT_STARTUP_VERIFY_MODE`).
 - Added `GET /_clawee/control/audit/verify` for runtime audit-integrity checks.
 - Added `verify-audit-chain` command in `scripts/security-tools.mjs` for offline/CI validation.

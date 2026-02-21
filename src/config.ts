@@ -116,6 +116,18 @@ export interface AppConfig {
   auditAttestationDefaultPath: string;
   auditAttestationSigningKey: string;
   auditAttestationSigningKeyringPath: string;
+  auditAttestationPeriodicEnabled: boolean;
+  auditAttestationPeriodicIntervalSeconds: number;
+  auditAttestationSnapshotDirectory: string;
+  auditAttestationChainPath: string;
+  auditAttestationMaxRecordsPerExport: number;
+  auditAttestationIncremental: boolean;
+  auditAttestationRetentionMaxFiles: number;
+  securityConformancePeriodicEnabled: boolean;
+  securityConformancePeriodicIntervalSeconds: number;
+  securityConformanceSnapshotDirectory: string;
+  securityConformanceChainPath: string;
+  securityConformanceRetentionMaxFiles: number;
   nodeId: string;
   clusterId: string;
   openclawHome: string;
@@ -223,6 +235,18 @@ export function loadConfig(): AppConfig {
   const securityConformanceExportPath =
     process.env.SECURITY_CONFORMANCE_EXPORT_PATH?.trim() ||
     path.join(openclawHome, "security_conformance.json");
+  const auditAttestationSnapshotDirectory =
+    process.env.AUDIT_ATTESTATION_SNAPSHOT_DIRECTORY?.trim() ||
+    path.join(openclawHome, "audit_attestation_snapshots");
+  const auditAttestationChainPath =
+    process.env.AUDIT_ATTESTATION_CHAIN_PATH?.trim() ||
+    path.join(openclawHome, "audit_attestation_chain.jsonl");
+  const securityConformanceSnapshotDirectory =
+    process.env.SECURITY_CONFORMANCE_SNAPSHOT_DIRECTORY?.trim() ||
+    path.join(openclawHome, "security_conformance_snapshots");
+  const securityConformanceChainPath =
+    process.env.SECURITY_CONFORMANCE_CHAIN_PATH?.trim() ||
+    path.join(openclawHome, "security_conformance_chain.jsonl");
   const approvalPolicyCatalogPath =
     process.env.APPROVAL_POLICY_CATALOG_PATH?.trim() ||
     path.join(process.cwd(), "config", "approval-policy-catalog.v1.json");
@@ -379,6 +403,36 @@ export function loadConfig(): AppConfig {
     auditAttestationSigningKey: process.env.AUDIT_ATTESTATION_SIGNING_KEY?.trim() || "",
     auditAttestationSigningKeyringPath:
       process.env.AUDIT_ATTESTATION_SIGNING_KEYRING_PATH?.trim() || "",
+    auditAttestationPeriodicEnabled: booleanEnv("AUDIT_ATTESTATION_PERIODIC_ENABLED", false),
+    auditAttestationPeriodicIntervalSeconds: numberEnv(
+      "AUDIT_ATTESTATION_PERIODIC_INTERVAL_SECONDS",
+      3600,
+    ),
+    auditAttestationSnapshotDirectory,
+    auditAttestationChainPath,
+    auditAttestationMaxRecordsPerExport: numberEnv(
+      "AUDIT_ATTESTATION_MAX_RECORDS_PER_EXPORT",
+      5000,
+    ),
+    auditAttestationIncremental: booleanEnv("AUDIT_ATTESTATION_INCREMENTAL", true),
+    auditAttestationRetentionMaxFiles: numberEnv(
+      "AUDIT_ATTESTATION_RETENTION_MAX_FILES",
+      0,
+    ),
+    securityConformancePeriodicEnabled: booleanEnv(
+      "SECURITY_CONFORMANCE_PERIODIC_ENABLED",
+      false,
+    ),
+    securityConformancePeriodicIntervalSeconds: numberEnv(
+      "SECURITY_CONFORMANCE_PERIODIC_INTERVAL_SECONDS",
+      3600,
+    ),
+    securityConformanceSnapshotDirectory,
+    securityConformanceChainPath,
+    securityConformanceRetentionMaxFiles: numberEnv(
+      "SECURITY_CONFORMANCE_RETENTION_MAX_FILES",
+      0,
+    ),
     nodeId: process.env.CLAWEE_NODE_ID?.trim() || os.hostname(),
     clusterId: process.env.CLAWEE_CLUSTER_ID?.trim() || "local",
     openclawHome,

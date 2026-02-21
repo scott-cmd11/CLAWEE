@@ -26,6 +26,17 @@ const requiredFiles = [
   "release-notes/v0.1.0.md",
 ];
 
+const strictWorkflowMarkers = [
+  {
+    path: ".github/workflows/security-smoke.yml",
+    markers: ["smoke:security:strict", "REPLAY_REDIS_URL", "REPLAY_POSTGRES_URL"],
+  },
+  {
+    path: ".github/workflows/release.yml",
+    markers: ["smoke:security:strict", "REPLAY_REDIS_URL", "REPLAY_POSTGRES_URL"],
+  },
+];
+
 const signatureFiles = [
   "config/policy-catalog.v1.json",
   "config/capability-catalog.v1.json",
@@ -105,6 +116,20 @@ if (!fs.existsSync(gatePath)) {
   } else if (guardIndex > proxyIndex) {
     failures += 1;
     console.error("invalid middleware order: proxy registered before guard");
+  }
+}
+
+for (const workflow of strictWorkflowMarkers) {
+  const full = path.join(root, workflow.path);
+  if (!fs.existsSync(full)) {
+    continue;
+  }
+  const content = fs.readFileSync(full, "utf8");
+  for (const marker of workflow.markers) {
+    if (!content.includes(marker)) {
+      failures += 1;
+      console.error(`missing workflow strict marker in ${workflow.path}: ${marker}`);
+    }
   }
 }
 
