@@ -1,306 +1,80 @@
 # Claw-EE
 
-Claw-EE is a security and governance sidecar for OpenClaw.  
-It sits between OpenClaw and model/tool providers to enforce enterprise controls before actions execute.
+**Claw-EE** is a security and governance add-on (a "sidecar") for OpenClaw. It acts as a protective shield that sits exactly between OpenClaw and the models or tools it interacts with.
 
-## Why Claw-EE Exists
+## What is this project?
 
-OpenClaw can execute meaningful work. Enterprise deployment needs more:
+OpenClaw is a powerful AI tool that can execute real, meaningful work. However, when companies want to use AI to work autonomously, they can't just let it run wild. They need strict rules, safety checks, and clear records of everything the AI does. 
 
-- enforceable policy gates (not just prompt-level intent)
-- replay protection and abuse controls for inbound channels
-- auditable, tamper-evident decision history
-- bounded compute spend and fail-closed behavior options
+Claw-EE solves this problem. It provides an "enterprise control-plane" without needing to alter any of the core code in OpenClaw. Think of it as a strict but helpful manager that oversees the OpenClaw worker. It checks all actions against your company's policies before any real work gets executed.
 
-Claw-EE provides those controls without requiring OpenClaw core changes.
+## Why should you care?
 
-## What You Get
+If you want to deploy autonomous AI agents like OpenClaw safely in a business, you need guarantees. Claw-EE prevents the AI from overspending, stops it from executing dangerous commands, protects it against malicious prompts, and records an unchangeable audit trail of its decisions.
 
-| Concern | Claw-EE control | Evidence surface |
-| --- | --- | --- |
-| Prompt injection / dangerous tool use | Policy engine + risk gate + approval workflow | `/_clawee/control/status`, audit ledger |
-| Replay / connector abuse | HMAC validation + nonce/event replay store (`sqlite`, `redis`, `postgres`) | `/_clawee/control/metrics`, replay store state |
-| Cost runaway / agentic drift | Economic circuit breaker (`HOURLY_USD_CAP`, `DAILY_USD_CAP`) | budget state in status/metrics |
-| Proactive initiative execution | Initiative Engine (task queue, retries, interrupt/start/pause/cancel) | `/_clawee/control/initiatives*`, initiative DB + audit ledger |
-| Model/provider drift | Signed model registry and policy catalogs | catalog fingerprints in status/conformance |
-| Governance and accountability | Hash-chained audit + signed attestations + conformance exports | attestation/conformance endpoints |
+Claw-EE gives you the confidence to roll out OpenClaw securely by providing:
 
-## How It Fits OpenClaw
+- **Enforceable Rules:** Strict policy gates that block risky actions before they happen.
+- **Human-in-the-loop Approvals:** Pauses sensitive AI actions until a human reviews and approves them.
+- **Budget Circuit Breakers:** Dollar caps (e.g., hourly or daily limits) so the AI doesn't accidentally run up a massive bill.
+- **Tamper-Proof Audit Trails:** A clear, verifiable history of exactly what the AI did and why, ensuring accountability.
+- **Security & Abuse Protection:** Heavy defenses against unauthorized access and replay attacks.
+- **Proactive Work Tasks:** An "Initiative Engine" that lets the AI safely work through queues of tasks (like pulling from Jira or PagerDuty).
+
+## How does it work?
+
+Normally, OpenClaw talks directly to external models and tools. With Claw-EE, the architecture looks like this:
 
 ```text
-OpenClaw -> Claw-EE gateway -> policy/risk/approval/budget checks -> upstream model/tool endpoint
+OpenClaw ➔ Claw-EE (Risk/Budget/Approval Safety Gateway) ➔ Upstream Model/Tool
 ```
 
-OpenClaw runtime mapping: `docs/openclaw-alignment.md`  
-API contract: `openapi/claw-ee.openapi.yaml`
-
-## Synthetic Worker Scope
-
-Claw-EE is designed as the enterprise control-plane around OpenClaw.  
-OpenClaw is the execution brain; Claw-EE provides policy, safety, cost control, and initiative orchestration.
-
-Current implementation status by modality stack:
-
-- Text + code ("brain"): implemented via gateway control, policy, approvals, and channel operations.
-- Action + tool use ("hands"): implemented as guarded execution path (risk gate, capability policy, approval, audit).
-- Vision + screen parsing ("eyes"): implemented as a secure VDI browser runtime (Docker worker + Playwright) with policy-gated control endpoints.
-- Audio + meeting presence ("ears/voice"): partial. Structured audio ingestion exists (`/_clawee/control/modality/ingest`), live meeting bot/WebRTC/TTS is roadmap.
-- Proactive work queue ("initiative"): implemented. Initiatives and tasks can be created, started, paused, interrupted, and audited.
+---
 
 ## Quickstart (10 minutes)
 
-1. Create env file.
-
-```powershell
-Copy-Item .env.example .env
-```
-
-2. Set minimum required values in `.env`:
-
-- `UPSTREAM_BASE_URL`
-- `INTERNAL_INFERENCE_BASE_URL`
-- `INTERNAL_INFERENCE_API_KEY`
-- `CONTROL_API_TOKEN`
-
-Note: catalog signing keys are required by config and have defaults in `.env.example`. Replace defaults for real deployments.
-
-3. Install and run.
-
-```powershell
-npm install
-npm run build
-npm run start
-```
-
-4. Run smoke checks.
-
-```powershell
-npm run smoke:security
-npm run repo:check
-```
-
-5. Optional: enable proactive initiative execution in `.env`:
-
-- `INITIATIVE_ENGINE_ENABLED=true`
-- `INITIATIVE_POLL_SECONDS=15`
-
-Windows fallback if `npm.ps1` is blocked:
-
-```powershell
-npm.cmd run smoke:security
-```
-
-## Strict Replay Verification
-
-Claw-EE supports strict replay smoke mode for CI/release:
-
-- `REPLAY_SMOKE_STRICT=true` causes replay smoke tests to fail if backend URLs are missing.
-- `smoke:security:strict` enables this mode.
-
-CI workflows (`.github/workflows/security-smoke.yml`, `.github/workflows/release.yml`) run strict smoke checks with Redis and Postgres service containers.
-Scheduled production validation is available via `.github/workflows/production-validation.yml`.
-
-## Deployment Modes
-
-1. Local evaluation
-- Single-node replay store (`REPLAY_STORE_MODE=sqlite`)
-- Fastest setup, not cross-node dedupe
-
-2. Multi-node enterprise
-- Shared replay store (`REPLAY_STORE_MODE=redis` or `postgres`)
-- Use `CLAWEE_NODE_ID` and `CLAWEE_CLUSTER_ID` for cluster telemetry
-
-3. Air-gapped / controlled egress
-- `OUTBOUND_INTERNET_POLICY=deny`
-- allowlist only required hosts via `ALLOWED_OUTBOUND_HOSTS`
-- optional TLS pinning and mTLS for upstream/inference transport
-
-## Control API Overview
-
-Auth: `Authorization: Bearer <token>` or `x-control-token`.
-
-Core groups:
-
-- System: `/_clawee/control/status`, `/_clawee/control/metrics`, suspend/resume
-- Policy/catalog reload: model, policy, approval-policy, capability-policy, control-tokens, destination-policy
-- Approvals: pending list, approve/deny, attestation export/verify
-- Audit/security: recent audit, audit verify, attestation export/verify, conformance export/verify, invariants
-- Channel operations: inbound/outbound visibility, send, delivery, retry, connector reload
-- Modality ingest: validated `text|vision|audio|action` payload intake
-- Initiative engine: create/list/start/pause/cancel/interrupt initiatives and inspect task/event history
-- Initiative intake adapters: Jira/Linear/PagerDuty webhook ingestion with token + HMAC + replay protection
-- Typed intake templates: provider events compile into deterministic `notify+triage` task plans (`channel.send` tasks)
-- OpenClaw adapter intake: `/_clawee/intake/openclaw/work-item` and `/_clawee/intake/openclaw/heartbeat`
-- VDI control: `/_clawee/control/vdi/session/start|step|stop` and session artifact inspection
-
-Full endpoint details: `openapi/claw-ee.openapi.yaml`
-
-### Initiative API quick example
-
-```powershell
-$token = "your-control-token"
-$headers = @{ Authorization = "Bearer $token" }
-
-Invoke-RestMethod -Method Post -Uri "http://localhost:8080/_clawee/control/initiatives" -Headers $headers -ContentType "application/json" -Body '{
-  "source":"jira",
-  "external_ref":"PROJ-123",
-  "title":"Prepare status update",
-  "priority":"normal",
-  "risk_class":"low",
-  "tasks":[
-    {
-      "task_type":"channel.send",
-      "payload":{
-        "channel":"slack",
-        "destination":"team-updates",
-        "text":"Status update prepared by Claw-EE initiative engine."
-      }
-    }
-  ]
-}'
-```
-
-### Intake Template Behavior
-
-`POST /_clawee/intake/{provider}/webhook` now compiles provider payloads into typed `notify+triage` plans.
-
-- Jira: `jira.issue.notify-triage.v1`
-- Linear: `linear.issue.notify-triage.v1`
-- PagerDuty: `pagerduty.incident.notify-triage.v1`
-
-Each plan currently emits two deterministic `channel.send` tasks (notify, triage) and writes template metadata (`template_id`, `template_version`, `template_strategy`) into initiative metadata for auditability.
-
-### OpenClaw Adapter Behavior
-
-`POST /_clawee/intake/openclaw/work-item` ingests OpenClaw work events and normalizes them into Claw-EE initiatives with deterministic template plans:
-
-- `openclaw.task.notify-execute.v1`
-- `openclaw.incident.interrupt-triage.v1`
-- `openclaw.message.respond.v1`
-- `openclaw.order.execute.v1`
-
-`POST /_clawee/intake/openclaw/heartbeat` ingests liveness telemetry for status/metrics (`openclaw_adapter.last_heartbeat_at`).
-
-## Configuration Reference
-
-Use `.env.example` as the full source of truth. High-impact groups:
-
-### Routing and execution
-
-- `UPSTREAM_BASE_URL`
-- `INTERNAL_INFERENCE_BASE_URL`
-- `INTERNAL_INFERENCE_API_KEY`
-- `ENFORCEMENT_MODE`
-- `RISK_EVALUATOR_FAIL_MODE`
-
-### Replay and cluster identity
-
-- `REPLAY_STORE_MODE` (`sqlite|redis|postgres`)
-- `REPLAY_REDIS_URL`, `REPLAY_REDIS_PREFIX`
-- `REPLAY_POSTGRES_URL`, `REPLAY_POSTGRES_SCHEMA`, `REPLAY_POSTGRES_TABLE_PREFIX`
-- `REPLAY_POSTGRES_CONNECT_TIMEOUT_MS`, `REPLAY_POSTGRES_SSL_MODE`
-- `CLAWEE_NODE_ID`, `CLAWEE_CLUSTER_ID`
-
-### Initiative engine (proactive queue)
-
-- `INITIATIVE_ENGINE_ENABLED`
-- `INITIATIVE_POLL_SECONDS`
-- `INITIATIVE_MAX_TASK_RETRIES`
-- `INITIATIVE_DB_PATH`
-- `INITIATIVE_INTAKE_ENABLED`
-- `INITIATIVE_INTAKE_TOKEN`
-- `INITIATIVE_INTAKE_HMAC_SECRET`
-- `INITIATIVE_INTAKE_MAX_SKEW_SECONDS`
-- `INITIATIVE_INTAKE_EVENT_TTL_SECONDS`
-- `OPENCLAW_INTAKE_ENABLED`
-- `OPENCLAW_INTAKE_TOKEN`
-- `OPENCLAW_INTAKE_HMAC_SECRET`
-- `OPENCLAW_INTAKE_MAX_SKEW_SECONDS`
-- `OPENCLAW_INTAKE_EVENT_TTL_SECONDS`
-
-### VDI runtime (secure computer use)
-
-- `VDI_RUNTIME_ENABLED`
-- `VDI_WORKER_BASE_URL`
-- `VDI_WORKER_AUTH_TOKEN`
-- `VDI_STEP_TIMEOUT_MS`
-- `VDI_SCREENSHOT_MAX_BYTES`
-- `VDI_ALLOWED_HOSTS`
-- `VDI_CONTAINER_ARTIFACT_PATH`
-
-### Budget and guardrails
-
-- `HOURLY_USD_CAP`, `DAILY_USD_CAP`
-- `MAX_REQUEST_INPUT_TOKENS`, `MAX_REQUEST_OUTPUT_TOKENS`
-- `CHANNEL_MAX_OUTBOUND_CHARS`
-- `CHANNEL_INGRESS_MAX_TEXT_CHARS`
-
-### Governance and approvals
-
-- `APPROVAL_REQUIRED_COUNT`, `APPROVAL_MAX_USES`, `APPROVAL_TTL_SECONDS`
-- `APPROVAL_POLICY_CATALOG_PATH`
-- `APPROVAL_ATTESTATION_*`, `AUDIT_ATTESTATION_*`
-- `SECURITY_CONFORMANCE_*`
-- `AUDIT_ATTESTATION_PERIODIC_*` for scheduled immutable audit snapshot export
-- `SECURITY_CONFORMANCE_PERIODIC_*` for scheduled immutable conformance export
-
-### Signed policy surfaces
-
-- `POLICY_CATALOG_*`
-- `MODEL_REGISTRY_*`
-- `CAPABILITY_CATALOG_*`
-- `CONTROL_TOKENS_*`
-- `CHANNEL_DESTINATION_POLICY_*`
-- `CHANNEL_CONNECTOR_SIGNING_KEY`
-
-## Operational Behavior (Key Defaults)
-
-- `ENFORCEMENT_MODE=block` blocks low-confidence risky actions.
-- `RISK_EVALUATOR_FAIL_MODE=block` fails closed on evaluator outage.
-- `AUDIT_STARTUP_VERIFY_MODE=block` blocks startup on broken audit chain.
-- `SECURITY_INVARIANTS_ENFORCEMENT=block` blocks on invariant bypass risk.
-- Oversized modality/channel payloads return `413`.
-- Replay collisions return `409`.
-- Approval-required actions return `428` until quorum is satisfied.
-- Rate-limited routes return `429` with `retry-after`.
-
-## Security Tooling
-
-Key rotation runbook: `docs/security-key-rotation.md`
-Production validation runbook: `docs/production-validation.md`
-
-Useful commands:
-
-```powershell
-node scripts/security-tools.mjs hash-token "my-secret-token"
-node scripts/security-tools.mjs verify-audit-chain "$env:USERPROFILE\\.openclaw\\enterprise_audit.db"
-node scripts/security-tools.mjs sign-control-catalog .\config\control-tokens.v1.example.json "signing-key"
-node scripts/security-tools.mjs sign-capability-catalog .\config\capability-catalog.v1.json "signing-key"
-node scripts/security-tools.mjs sign-approval-policy-catalog .\config\approval-policy-catalog.v1.json "signing-key"
-```
-
-## Repository Scripts
-
-- `npm run build`
-- `npm run dev`
-- `npm run start`
-- `npm run smoke:security`
-- `npm run smoke:security:strict`
-- `npm run validate:production:quick`
-- `npm run validate:production`
-- `npm run validate:production:soak`
-- `npm run repo:check`
-- `npm run security:invariants`
-- `npm run release:notes -- <tag>`
-
-## Who This Is For
-
-- Platform, security, and infra teams evaluating autonomous agent deployment risk
-- Teams using OpenClaw that need enforceable controls and auditable operations
-
-## Not A Goal
-
-- Replacing OpenClaw runtime behavior or agent UX
-- Claiming formal theorem-proved end-to-end correctness
-
-Current roadmap/non-goals: `docs/openclaw-alignment.md`
+1. Create your environment file:
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+2. Set the minimum required values in `.env`:
+   - `UPSTREAM_BASE_URL`
+   - `INTERNAL_INFERENCE_BASE_URL`
+   - `INTERNAL_INFERENCE_API_KEY`
+   - `CONTROL_API_TOKEN`
+   
+   *(Note: Catalog signing keys are required by config and have defaults in `.env.example`. Replace defaults for real deployments.)*
+
+3. Install dependencies and start the gateway:
+   ```powershell
+   npm install
+   npm run build
+   npm run start
+   ```
+
+4. Verify it's working by running the security smoke checks:
+   ```powershell
+   npm run smoke:security
+   npm run repo:check
+   ```
+   *(Windows fallback if `npm.ps1` is blocked: `npm.cmd run smoke:security`)*
+
+5. **Optional:** Enable proactive initiative execution in `.env`:
+   - `INITIATIVE_ENGINE_ENABLED=true`
+   - `INITIATIVE_POLL_SECONDS=15`
+
+---
+
+## Technical Features at a Glance
+
+| What are you worried about? | How Claw-EE fixes it | How to verify it |
+| --- | --- | --- |
+| **Dangerous tool use** | Risk gates & approval workflows | `/_clawee/control/status`, audit ledger |
+| **Abuse & spam** | HMAC validation & replay protection databases | `/_clawee/control/metrics` |
+| **Runaway cloud costs** | Economic circuit breakers (`HOURLY_USD_CAP`) | Budget state in metrics |
+| **Independent task execution** | The Initiative Engine (task queue, retries) | `/_clawee/control/initiatives*` |
+| **Changing AI models** | Signed model registry & policy catalogs | Catalog fingerprints |
+| **Lack of accountability** | Hash-chained audits & signed attestations | Attestation export endpoints |
+
+*(For full details on API endpoints, strict CI validation, specialized deployment modes (Local, Enterprise, Air-gapped), and advanced configuration, please refer to the `openapi/` and `docs/` folders in this repository.)*
