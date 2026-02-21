@@ -16,6 +16,7 @@ const requiredFiles = [
   ".env.example",
   ".github/workflows/security-smoke.yml",
   ".github/workflows/release.yml",
+  ".github/workflows/production-validation.yml",
   ".github/pull_request_template.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/feature_request.yml",
@@ -24,6 +25,7 @@ const requiredFiles = [
   "config/capability-catalog.v1.json",
   "config/approval-policy-catalog.v1.json",
   "release-notes/v0.1.0.md",
+  "docs/production-validation.md",
 ];
 
 const strictWorkflowMarkers = [
@@ -34,6 +36,10 @@ const strictWorkflowMarkers = [
   {
     path: ".github/workflows/release.yml",
     markers: ["smoke:security:strict", "REPLAY_REDIS_URL", "REPLAY_POSTGRES_URL"],
+  },
+  {
+    path: ".github/workflows/production-validation.yml",
+    markers: ["validate:production", "REPLAY_REDIS_URL", "REPLAY_POSTGRES_URL"],
   },
 ];
 

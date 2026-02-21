@@ -98,6 +98,7 @@ Claw-EE supports strict replay smoke mode for CI/release:
 - `smoke:security:strict` enables this mode.
 
 CI workflows (`.github/workflows/security-smoke.yml`, `.github/workflows/release.yml`) run strict smoke checks with Redis and Postgres service containers.
+Scheduled production validation is available via `.github/workflows/production-validation.yml`.
 
 ## Deployment Modes
 
@@ -227,6 +228,7 @@ Use `.env.example` as the full source of truth. High-impact groups:
 ## Security Tooling
 
 Key rotation runbook: `docs/security-key-rotation.md`
+Production validation runbook: `docs/production-validation.md`
 
 Useful commands:
 
@@ -245,6 +247,9 @@ node scripts/security-tools.mjs sign-approval-policy-catalog .\config\approval-p
 - `npm run start`
 - `npm run smoke:security`
 - `npm run smoke:security:strict`
+- `npm run validate:production:quick`
+- `npm run validate:production`
+- `npm run validate:production:soak`
 - `npm run repo:check`
 - `npm run security:invariants`
 - `npm run release:notes -- <tag>`

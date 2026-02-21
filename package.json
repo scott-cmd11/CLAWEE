@@ -13,6 +13,9 @@
     "smoke:redis-replay": "npm run build && node tests/replay-redis-smoke.mjs",
     "smoke:postgres-replay": "npm run build && node tests/replay-postgres-smoke.mjs",
     "smoke:initiative": "npm run build && node tests/initiative-smoke.mjs",
+    "validate:production:quick": "node scripts/production-validation.mjs --profile=quick",
+    "validate:production": "node scripts/production-validation.mjs --profile=staging",
+    "validate:production:soak": "node scripts/production-validation.mjs --profile=soak --iterations=10",
     "security:invariants": "node scripts/security-invariants-check.mjs",
     "repo:check": "node scripts/repo-check.mjs",
     "release:notes": "node scripts/generate-release-notes.mjs"
